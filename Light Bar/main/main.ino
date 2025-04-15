@@ -37,8 +37,7 @@ void setup() {
   Serial.begin(115200);
   
   // Initialize LED strip
-  FastLED.addLeds<WS2812B, LED_PIN, GRB>(leds, LED_COUNT);
-  FastLED.setBrightness(100);  // Set brightness (0-255)
+  FastLED.addLeds<NEOPIXEL, LED_PIN>(Strip, LED_COUNT);
   FastLED.clear();             // Clear all LEDs
   FastLED.show();              // Update LEDs with all off
   
