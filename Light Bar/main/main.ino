@@ -37,7 +37,7 @@ void setup() {
   Serial.begin(115200);
   
   // Initialize LED strip
-  FastLED.addLeds<NEOPIXEL, LED_PIN>(Strip, LED_COUNT);
+  FastLED.addLeds<NEOPIXEL, LED_PIN>(leds, LED_COUNT);
   FastLED.clear();             // Clear all LEDs
   FastLED.show();              // Update LEDs with all off
   
