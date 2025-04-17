@@ -1,17 +1,19 @@
 #include <ESP8266WiFi.h>
 #include <ArduinoJson.h>
-#include <ESP8266WebServer.h>
+#include <WebSocketsClient.h>
 
 // WiFi credentials
 const char* ssid = "YourWiFiSSID";      // Replace with your WiFi SSID
 const char* password = "YourWiFiPassword"; // Replace with your WiFi password
 
-// Server setup
-ESP8266WebServer server(80);
+// WebSocket settings
+const char* websocket_server = "your-websocket-server.com";  // Replace with your WebSocket server
+const int websocket_port = 8080;  // Replace with your WebSocket port
+const char* websocket_path = "/motor";  // WebSocket path to connect to
 
 // Motor configuration
-#define MOTOR_PIN   2       // GPIO pin for motor control
-#define VALID_MOTOR_ID  1   // The valid motor ID
+const int VALID_MOTOR_ID = 1;    // The valid motor ID
+const int MOTOR_PIN = 2;         // GPIO2 (D4 on NodeMCU boards)
 
 // Motor state variables
 bool motor_state = false;
@@ -19,9 +21,12 @@ int motor_delay = 0;
 int motor_intensity = 0;
 unsigned long motor_lastToggle = 0;
 
+// WebSocket client
+WebSocketsClient webSocket;
+
 // Function prototypes
-bool motor_control(int motor_id, bool motor_on, int motor_delay, int motor_intensity);
-void handle_post_motor_control();
+bool motor_control(bool motor_on, int motor_delay, int motor_intensity);
+void webSocketEvent(WStype_t type, uint8_t * payload, size_t length);
 
 void setup() {
   Serial.begin(115200);
@@ -32,99 +37,115 @@ void setup() {
   
   // Connect to WiFi
   WiFi.begin(ssid, password);
-  Serial.print("Connecting to WiFi");
+  Serial.print(F("Connecting to WiFi"));
   
   while (WiFi.status() != WL_CONNECTED) {
     delay(500);
-    Serial.print(".");
+    Serial.print(F("."));
   }
   
-  Serial.println("");
-  Serial.println("WiFi connected");
-  Serial.print("IP address: ");
+  Serial.println(F(""));
+  Serial.println(F("WiFi connected"));
+  Serial.print(F("IP address: "));
   Serial.println(WiFi.localIP());
   
-  // Set up server endpoint
-  server.on("/motor/control", HTTP_POST, handle_post_motor_control);
+  // Initialize WebSocket connection
+  Serial.println(F("Connecting to WebSocket server"));
+  webSocket.begin(websocket_server, websocket_port, websocket_path);
+  webSocket.onEvent(webSocketEvent);
+  webSocket.setReconnectInterval(5000);  // Try to reconnect every 5 seconds if connection is lost
   
-  // Start server
-  server.begin();
-  Serial.println("HTTP server started");
+  Serial.println(F("WebSocket client started"));
 }
 
 void loop() {
-  server.handleClient();
+  // Keep the WebSocket connection alive
+  webSocket.loop();
   
   // Handle motor cycling
+  bool motor_onPhase = (VALID_MOTOR_ID == 1);  // true if motor_id is 1 (on->off), false otherwise (off->on)
+
   if (motor_state) {
     unsigned long currentMillis = millis();
     if (motor_delay > 0) {
       if (currentMillis - motor_lastToggle >= motor_delay) {
         motor_lastToggle = currentMillis;
-        // Toggle motor state
-        if (digitalRead(MOTOR_PIN) == HIGH) {
-          analogWrite(MOTOR_PIN, 0);  // Turn off
+
+        if (motor_onPhase) {
+          // Turn motor ON
+          analogWrite(MOTOR_PIN, motor_intensity);
         } else {
-          analogWrite(MOTOR_PIN, motor_intensity);  // Turn on with intensity
+          // Turn motor OFF
+          analogWrite(MOTOR_PIN, 0);
         }
+
+        // Flip phase for next cycle
+        motor_onPhase = !motor_onPhase;
       }
     }
   }
 }
 
-// Handle POST request for motor control
-void handle_post_motor_control() {
-  if (server.hasArg("plain")) {
-    String body = server.arg("plain");
-    DynamicJsonDocument doc(1024);
-    DeserializationError error = deserializeJson(doc, body);
-
-    if (error) {
-      server.send(400, "application/json", "{\"status\":\"error\",\"message\":\"Invalid JSON\"}");
-      return;
-    }
-
-    // Extract parameters from JSON
-    if (!doc.containsKey("motor_id") || !doc.containsKey("motor_on") || 
-        !doc.containsKey("motor_delay") || !doc.containsKey("motor_intensity")) {
-      server.send(400, "application/json", "{\"status\":\"error\",\"message\":\"Missing required parameters\"}");
-      return;
-    }
-
-    int motor_id = doc["motor_id"];
-    bool motor_on = doc["motor_on"];
-    int motor_delay = doc["motor_delay"];
-    int motor_intensity = doc["motor_intensity"];
-
-    // Call the motor control function
-    bool success = motor_control(motor_id, motor_on, motor_delay, motor_intensity);
-    
-    if (success) {
-      server.send(200, "application/json", "{\"status\":\"success\",\"message\":\"Motor control updated\"}");
-    } else {
-      server.send(400, "application/json", "{\"status\":\"error\",\"message\":\"Invalid parameters\"}");
-    }
-  } else {
-    server.send(400, "application/json", "{\"status\":\"error\",\"message\":\"No body provided\"}");
+// WebSocket event handler
+void webSocketEvent(WStype_t type, uint8_t * payload, size_t length) {
+  switch(type) {
+    case WStype_DISCONNECTED:
+      Serial.println(F("WebSocket disconnected"));
+      break;
+      
+    case WStype_CONNECTED:
+      Serial.println(F("WebSocket connected"));
+      // Send a message to the server
+      webSocket.sendTXT("ESP8266 motor control connected");
+      break;
+      
+    case WStype_TEXT:
+      Serial.printf("[WebSocket] Received: %s\n", payload);
+      
+      // Parse the incoming JSON
+      DynamicJsonDocument doc(256);
+      DeserializationError error = deserializeJson(doc, payload);
+      
+      if (error) {
+        Serial.println(F("Failed to parse JSON message"));
+        return;
+      }
+      
+      // Check for required parameters
+      if (!doc.containsKey("motor_on") || 
+          !doc.containsKey("motor_delay") || !doc.containsKey("motor_intensity")) {
+        Serial.println(F("Missing required parameters"));
+        return;
+      }
+      
+      // Extract parameters
+      bool motor_on = doc["motor_on"];
+      int motor_delay = doc["motor_delay"];
+      int motor_intensity = doc["motor_intensity"];
+      
+      // Apply motor control
+      bool success = motor_control(motor_on, motor_delay, motor_intensity);
+      
+      // Send response back to server
+      if (success) {
+        webSocket.sendTXT("{\"status\":\"success\",\"message\":\"Motor control updated\"}");
+      } else {
+        webSocket.sendTXT("{\"status\":\"error\",\"message\":\"Invalid parameters\"}");
+      }
+      break;
   }
 }
 
 // Motor control function that validates and applies motor settings
-bool motor_control(int motor_id, bool motor_on, int motor_delay, int motor_intensity) {
-  // Validate motor_id
-  if (motor_id != VALID_MOTOR_ID) {
-    Serial.println("Invalid motor ID");
-    return false;
-  }
-  
+bool motor_control(bool motor_on, int motor_delay, int motor_intensity) {  
   // Validate ranges
-  if (motor_delay < 100 || motor_delay > 1500) {
-    Serial.println("Invalid motor speed");
+  if (motor_delay <= 100 || motor_delay >= 1500) {
+    Serial.println(F("Invalid motor speed"));
     return false;
   }
   
-  if (motor_intensity < 40 || motor_intensity > 200) {
-    Serial.println("Invalid motor intensity");
+  if (motor_intensity <= 40 || motor_intensity >= 200) {
+    Serial.println(F("Invalid motor intensity"));
     return false;
   }
   
@@ -141,7 +162,7 @@ bool motor_control(int motor_id, bool motor_on, int motor_delay, int motor_inten
     analogWrite(MOTOR_PIN, motor_intensity);  // Start with the motor on
   }
   
-  Serial.println("Motor updated");
+  Serial.println(F("Motor updated"));
   
   return true;
 }

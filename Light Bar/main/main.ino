@@ -7,11 +7,13 @@
 const char* ssid = "YourWiFiSSID";      // Replace with your WiFi SSID
 const char* password = "YourWiFiPassword"; // Replace with your WiFi password
 
-// Server setup
-ESP8266WebServer server(80);
+// WebSocket settings
+const char* websocket_server = "your-websocket-server.com";  // Replace with your WebSocket server
+const int websocket_port = 8080;  // Replace with your WebSocket port
+const char* websocket_path = "/led";  // WebSocket path to connect to
 
 // LED Strip configuration
-#define LED_PIN     2      // GPIO pin connected to the LED strip
+#define LED_PIN      2      // GPIO pin connected to the LED strip
 #define LED_COUNT   20      // Number of LEDs in the strip
 CRGB leds[LED_COUNT];       // Define the LED strip array
 
@@ -28,9 +30,12 @@ bool forward_direction = true;
 unsigned long last_led_update = 0;
 bool animation_active = false;
 
+// WebSocket client
+WebSocketsClient webSocket;
+
 // Function prototypes
 void update_led_animation();
-void handle_post_led_control();
+void webSocketEvent(WStype_t type, uint8_t * payload, size_t length);
 bool validate_led_params(bool light_on, int r, int g, int b, int delay_val);
 
 void setup() {
@@ -55,17 +60,18 @@ void setup() {
   Serial.print(F("IP address: "));
   Serial.println(WiFi.localIP());
   
-  // Set up server endpoint
-  server.on("/led/control", HTTP_POST, handle_post_led_control);
+  // Initialize WebSocket connection
+  Serial.println(F("Connecting to WebSocket server"));
+  webSocket.begin(websocket_server, websocket_port, websocket_path);
+  webSocket.onEvent(webSocketEvent);
+  webSocket.setReconnectInterval(5000);  // Try to reconnect every 5 seconds if connection is lost
   
-  // Start server
-  server.begin();
-  Serial.println(F("HTTP server started"));
+  Serial.println(F("WebSocket client started"));
 }
 
 void loop() {
-  // Handle any incoming client requests
-  server.handleClient();
+  // Keep the WebSocket connection alive
+  webSocket.loop();
   
   // Update LED animation if active
   if (light_state) {
@@ -114,57 +120,71 @@ void update_led_animation() {
   }
 }
 
-// Handle POST request for LED control
-void handle_post_led_control() {
-  if (server.hasArg("plain")) {
-    String body = server.arg("plain");
-    DynamicJsonDocument doc(256); // Reduced size for optimization
-    DeserializationError error = deserializeJson(doc, body);
-
-    if (error) {
-      server.send(400, F("application/json"), F("{\"status\":\"error\",\"message\":\"Invalid JSON\"}"));
-      return;
-    }
-
-    // Extract parameters from JSON
-    if (!doc.containsKey("light_on") || 
-        !doc.containsKey("light_r") || 
-        !doc.containsKey("light_g") || 
-        !doc.containsKey("light_b") || 
-        !doc.containsKey("light_delay")) {
-      server.send(400, F("application/json"), F("{\"status\":\"error\",\"message\":\"Missing required parameters\"}"));
-      return;
-    }
-
-    bool light_on = doc["light_on"];
-    int r = doc["light_r"];
-    int g = doc["light_g"];
-    int b = doc["light_b"];
-    int delay_val = doc["light_delay"];
-
-    // Validate LED parameters
-    bool valid = validate_led_params(light_on, r, g, b, delay_val);
-    
-    if (valid) {
-      // Update global state variables
-      light_state = light_on;
-      light_r = r;
-      light_g = g;
-      light_b = b;
-      light_delay = delay_val;
+// WebSocket event handler
+void webSocketEvent(WStype_t type, uint8_t * payload, size_t length) {
+  switch(type) {
+    case WStype_DISCONNECTED:
+      Serial.println(F("WebSocket disconnected"));
+      break;
       
-      // Reset animation state if needed
-      if (light_on && !animation_active) {
-        current_led = 0;
-        forward_direction = true;
+    case WStype_CONNECTED:
+      Serial.println(F("WebSocket connected"));
+      // Send a message to the server
+      webSocket.sendTXT("ESP8266 LED control connected");
+      break;
+      
+    case WStype_TEXT:
+      Serial.printf("[WebSocket] Received: %s\n", payload);
+      
+      // Parse the incoming JSON
+      DynamicJsonDocument doc(256);
+      DeserializationError error = deserializeJson(doc, payload);
+      
+      if (error) {
+        Serial.println(F("Failed to parse JSON message"));
+        return;
       }
       
-      server.send(200, F("application/json"), F("{\"status\":\"success\",\"message\":\"LED control updated\"}"));
-    } else {
-      server.send(400, F("application/json"), F("{\"status\":\"error\",\"message\":\"Invalid parameters\"}"));
-    }
-  } else {
-    server.send(400, F("application/json"), F("{\"status\":\"error\",\"message\":\"No body provided\"}"));
+      // Check for required parameters
+      if (!doc.containsKey("light_on") || 
+          !doc.containsKey("light_r") || 
+          !doc.containsKey("light_g") || 
+          !doc.containsKey("light_b") || 
+          !doc.containsKey("light_delay")) {
+        Serial.println(F("Missing required parameters"));
+        return;
+      }
+      
+      // Extract parameters
+      bool light_on_new = doc["light_on"];
+      int r = doc["light_r"];
+      int g = doc["light_g"];
+      int b = doc["light_b"];
+      int delay_val = doc["light_delay"];
+      
+      // Validate LED parameters
+      bool valid = validate_led_params(light_on_new, r, g, b, delay_val);
+      
+      if (valid) {
+        // Update global state variables
+        light_state = light_on_new;
+        light_r = r;
+        light_g = g;
+        light_b = b;
+        light_delay = delay_val;
+        
+        // Reset animation state if needed
+        if (light_on_new && !animation_active) {
+          current_led = 0;
+          forward_direction = true;
+        }
+        
+        // Send response back to server
+        webSocket.sendTXT("{\"status\":\"success\",\"message\":\"LED control updated\"}");
+      } else {
+        webSocket.sendTXT("{\"status\":\"error\",\"message\":\"Invalid parameters\"}");
+      }
+      break;
   }
 }
 
