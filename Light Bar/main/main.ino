@@ -10,7 +10,6 @@ const char* password = "YourWiFiPassword"; // Replace with your WiFi password
 // WebSocket settings
 const char* websocket_server = "your-websocket-server.com";  // Replace with your WebSocket server
 const int websocket_port = 8080;  // Replace with your WebSocket port
-const char* websocket_path = "/led";  // WebSocket path to connect to
 
 // LED Strip configuration
 #define LED_PIN      2      // GPIO pin connected to the LED strip
@@ -62,7 +61,7 @@ void setup() {
   
   // Initialize WebSocket connection
   Serial.println(F("Connecting to WebSocket server"));
-  webSocket.begin(websocket_server, websocket_port, websocket_path);
+  webSocket.begin(websocket_server, websocket_port);
   webSocket.onEvent(webSocketEvent);
   webSocket.setReconnectInterval(5000);  // Try to reconnect every 5 seconds if connection is lost
   
