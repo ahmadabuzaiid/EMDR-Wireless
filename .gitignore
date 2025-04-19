@@ -1,1 +1,2 @@
-*/config.h
+# Ignore all config.h files
+**/config.h
