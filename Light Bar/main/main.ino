@@ -1,15 +1,8 @@
+#include"config.h"
 #include <FastLED.h>
 #include <ArduinoJson.h>
 #include <ESP8266WiFi.h>
 #include <ESP8266WebServer.h>
-
-// WiFi credentials
-const char* ssid = "YourWiFiSSID";      // Replace with your WiFi SSID
-const char* password = "YourWiFiPassword"; // Replace with your WiFi password
-
-// WebSocket settings
-const char* websocket_server = "your-websocket-server.com";  // Replace with your WebSocket server
-const int websocket_port = 8080;  // Replace with your WebSocket port
 
 // LED Strip configuration
 #define LED_PIN      2      // GPIO pin connected to the LED strip
