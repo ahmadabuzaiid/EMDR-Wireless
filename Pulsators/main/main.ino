@@ -1,14 +1,7 @@
+#include "config.h"
 #include <ESP8266WiFi.h>
 #include <ArduinoJson.h>
 #include <WebSocketsClient.h>
-
-// WiFi credentials
-const char* ssid = "YourWiFiSSID";      // Replace with your WiFi SSID
-const char* password = "YourWiFiPassword"; // Replace with your WiFi password
-
-// WebSocket settings
-const char* websocket_server = "your-websocket-server.com";  // Replace with your WebSocket server
-const int websocket_port = 8080;  // Replace with your WebSocket port
 
 // Motor configuration
 const int VALID_MOTOR_ID = 1;    // The valid motor ID
