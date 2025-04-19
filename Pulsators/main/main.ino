@@ -9,7 +9,6 @@ const char* password = "YourWiFiPassword"; // Replace with your WiFi password
 // WebSocket settings
 const char* websocket_server = "your-websocket-server.com";  // Replace with your WebSocket server
 const int websocket_port = 8080;  // Replace with your WebSocket port
-const char* websocket_path = "/motor";  // WebSocket path to connect to
 
 // Motor configuration
 const int VALID_MOTOR_ID = 1;    // The valid motor ID
@@ -51,7 +50,7 @@ void setup() {
   
   // Initialize WebSocket connection
   Serial.println(F("Connecting to WebSocket server"));
-  webSocket.begin(websocket_server, websocket_port, websocket_path);
+  webSocket.begin(websocket_server, websocket_port);
   webSocket.onEvent(webSocketEvent);
   webSocket.setReconnectInterval(5000);  // Try to reconnect every 5 seconds if connection is lost
   
@@ -139,12 +138,12 @@ void webSocketEvent(WStype_t type, uint8_t * payload, size_t length) {
 // Motor control function that validates and applies motor settings
 bool motor_control(bool motor_on, int motor_delay, int motor_intensity) {  
   // Validate ranges
-  if (motor_delay <= 100 || motor_delay >= 1500) {
+  if (motor_delay < 100 || motor_delay > 1500) {
     Serial.println(F("Invalid motor speed"));
     return false;
   }
   
-  if (motor_intensity <= 40 || motor_intensity >= 200) {
+  if (motor_intensity < 40 || motor_intensity > 200) {
     Serial.println(F("Invalid motor intensity"));
     return false;
   }
