@@ -182,6 +182,11 @@ void webSocketEvent(WStype_t type, uint8_t * payload, size_t length) {
 
 // Validate LED parameters
 bool validate_led_params(bool light_on, int r, int g, int b, int delay_val) {
+
+  if (light_on != 0 || light_on != 1) {
+    Serial.println(F("Invalid light status"));
+    return false;
+  }
   // Check RGB ranges (0-255)
   if (r < 0 || r > 255 || g < 0 || g > 255 || b < 0 || b > 255) {
     Serial.println(F("Invalid RGB values"));
