@@ -183,7 +183,7 @@ void webSocketEvent(WStype_t type, uint8_t * payload, size_t length) {
 // Validate LED parameters
 bool validate_led_params(bool light_on, int r, int g, int b, int delay_val) {
 
-  if (light_on != 0 || light_on != 1) {
+  if (light_on != 0 && light_on != 1) {
     Serial.println(F("Invalid light status"));
     return false;
   }
