@@ -22,7 +22,7 @@ void webSocketEvent(WStype_t type, uint8_t * payload, size_t length);
 
 void setup() {
   Serial.begin(115200);
-  
+
   // Initialize motor pin as output
   pinMode(MOTOR_PIN, OUTPUT);
   digitalWrite(MOTOR_PIN, LOW);
@@ -131,7 +131,7 @@ void webSocketEvent(WStype_t type, uint8_t * payload, size_t length) {
 // Motor control function that validates and applies motor settings
 bool motor_control(bool motor_on, int motor_delay, int motor_intensity) {  
   // Validate ranges
-  if (motor_on != 0 || motor_on != 1) {
+  if (motor_on != 0 && motor_on != 1) {
     Serial.println(F("Invalid motor status"));
     return false;
   }
