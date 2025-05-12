@@ -237,14 +237,13 @@ void setup() {
 }
 
 void loop() {
-  // Update LED animation if active
-  if (light_state) {
-    update_led_animation();
-  }
-
-  if (!deviceConnected) {
+  while (!deviceConnected) {
     delay(500);
     pServer->startAdvertising();
     Serial.println("Restarting advertising");
+  }
+  // Update LED animation if active
+  if (light_state) {
+    update_led_animation();
   }
 }
