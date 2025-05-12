@@ -1,20 +1,27 @@
-#include"config.h"
+#include "config.h"
 #include <FastLED.h>
-#include <ArduinoJson.h>
-#include <ESP8266WiFi.h>
-#include <ESP8266WebServer.h>
+#include <BLE2902.h>
+#include <BLEUtils.h>
+#include <BLEDevice.h>
+#include <BLEServer.h>
 
 // LED Strip configuration
 #define LED_PIN      2      // GPIO pin connected to the LED strip
 #define LED_COUNT   20      // Number of LEDs in the strip
 CRGB leds[LED_COUNT];       // Define the LED strip array
 
+// BLE UUIDs
+#define LIGHTBAR_SERVICE_UUID "1fb5c201-4faf-459e-8fcc-c5c9c331914b"
+#define LED_STATE_CHARACTERISTIC_UUID "2cac943b-668b-4de0-8091-332dedc91739"
+#define LED_COLOR_CHARACTERISTIC_UUID "526f1035-4262-4175-8ad0-16387b946fce"
+#define LED_DELAY_CHARACTERISTIC_UUID "ee231dc3-9f67-4254-a52a-e41b59f50502"
+
 // LED state variables
-bool light_state = false;
-int light_r = 0;
-int light_g = 0;
-int light_b = 0;
-int light_delay = 20;
+uint8_t light_state = 0;
+uint8_t light_r = 0;
+uint8_t light_g = 0;
+uint8_t light_b = 0;
+inuint8_tt light_delay = 20;
 
 // Animation control variables
 int current_led = 0;
@@ -22,59 +29,124 @@ bool forward_direction = true;
 unsigned long last_led_update = 0;
 bool animation_active = false;
 
-// WebSocket client
-WebSocketsClient webSocket;
+// For handling new values between cycles
+bool new_values_pending = false;
+uint8_t new_light_state = 0;
+uint8_t new_light_r = 0;
+uint8_t new_light_g = 0;
+uint8_t new_light_b = 0;
+uint8_t new_light_delay = 20;
 
-// Function prototypes
-void update_led_animation();
-void webSocketEvent(WStype_t type, uint8_t * payload, size_t length);
-bool validate_led_params(bool light_on, int r, int g, int b, int delay_val);
+// BLE state
+bool deviceConnected = false;
+BLEServer* pServer = nullptr;
 
-void setup() {
-  Serial.begin(115200);
-  
-  // Initialize LED strip
-  FastLED.addLeds<NEOPIXEL, LED_PIN>(leds, LED_COUNT);
-  FastLED.clear();             // Clear all LEDs
-  FastLED.show();              // Update LEDs with all off
-  
-  // Connect to WiFi
-  WiFi.begin(ssid, password);
-  Serial.print(F("Connecting to WiFi"));
-  
-  while (WiFi.status() != WL_CONNECTED) {
-    delay(500);
-    Serial.print(F("."));
-  }
-  
-  Serial.println(F(""));
-  Serial.println(F("WiFi connected"));
-  Serial.print(F("IP address: "));
-  Serial.println(WiFi.localIP());
-  
-  // Initialize WebSocket connection
-  Serial.println(F("Connecting to WebSocket server"));
-  webSocket.begin(websocket_server, websocket_port);
-  webSocket.onEvent(webSocketEvent);
-  webSocket.setReconnectInterval(5000);  // Try to reconnect every 5 seconds if connection is lost
-  
-  Serial.println(F("WebSocket client started"));
-}
+// Apply new LED parameters after cycle
+void applyPendingValues() {
+  if (new_values_pending) {
+    Serial.println("Applying new LED parameters");
 
-void loop() {
-  // Keep the WebSocket connection alive
-  webSocket.loop();
-  
-  // Update LED animation if active
-  if (light_state) {
-    update_led_animation();
-  } else if (animation_active) {
-    // Turn off all LEDs when light_state becomes false
-    FastLED.clear();
-    FastLED.show();
-    animation_active = false;
+    light_state = new_light_state;
+    light_r = new_light_r;
+    light_g = new_light_g;
+    light_b = new_light_b;
+    light_delay = new_light_delay;
+
+    if (!light_state) {
+      FastLED.clear();
+      FastLED.show();
+      animation_active = false;
+    } else if (!animation_active) {
+      current_led = 0;
+      forward_direction = true;
+      animation_active = true;
+    }
+
+    new_values_pending = false;
+
+    Serial.println("LED updated with new values");
   }
 }
+
+// BLE Server callbacks
+class ServerCallbacks : public BLEServerCallbacks {
+  void onConnect(BLEServer* pServer) {
+    deviceConnected = true;
+    Serial.println("Device connected");
+  }
+
+  void onDisconnect(BLEServer* pServer) {
+    deviceConnected = false;
+    Serial.println("Device disconnected");
+  }
+};
+
+// LED state characteristic callback
+class LedStateCallback : public BLECharacteristicCallbacks {
+  void onWrite(BLECharacteristic* pCharacteristic) {
+    uint8_t* data = pCharacteristic->getData();
+    if (data) {
+      uint8_t value = data[0];
+      Serial.print("Received LED state: ");
+      Serial.println(value);
+      if (value != 0 && value != 1) {
+        Serial.println("Invalid LED state");
+        return;
+      }
+
+      new_light_state = value;
+      new_values_pending = true;
+      if (!light_state || !animation_active) applyPendingValues();
+      else Serial.println("New LED state pending");
+    }
+  }
+};
+
+// LED color characteristic callback
+class LedColorCallback : public BLECharacteristicCallbacks {
+  void onWrite(BLECharacteristic* pCharacteristic) {
+    uint8_t* data = pCharacteristic->getData();
+    if (data && pCharacteristic->getLength() >= 3) {
+      int r = data[0];
+      int g = data[1];
+      int b = data[2];
+      Serial.printf("Received LED color: R=%d, G=%d, B=%d\n", r, g, b);
+      
+      if (r < 0 || r > 255 || g < 0 || g > 255 || b < 0 || b > 255) {
+        Serial.println("Invalid RGB values");
+        return;
+      }
+
+      new_light_r = r;
+      new_light_g = g;
+      new_light_b = b;
+      new_values_pending = true;
+      if (!light_state || !animation_active) applyPendingValues();
+      else Serial.println("New LED color pending");
+    }
+  }
+};
+
+// LED delay characteristic callback
+class LedDelayCallback : public BLECharacteristicCallbacks {
+  void onWrite(BLECharacteristic* pCharacteristic) {
+    uint8_t* data = pCharacteristic->getData();
+    if (data) {
+      uint8_t value = data[0];
+      Serial.print("Received LED delay: ");
+      Serial.println(value);
+      if (value < 5 || value > 75 || value % 5 != 0) {
+        Serial.println("Invalid LED delay");
+        return;
+      }
+
+      new_light_delay = value;
+      new_values_pending = true;
+      if (!light_state || !animation_active) applyPendingValues();
+      else Serial.println("New LED delay pending");
+    }
+  }
+};
 
 // Non-blocking LED animation update
 void update_led_animation() {
@@ -101,103 +173,78 @@ void update_led_animation() {
       if (current_led >= LED_COUNT - 1) {
         current_led = LED_COUNT - 1;
         forward_direction = false;
+        
+        // Check for pending values when changing direction at the end
+        if (new_values_pending) {
+          applyPendingValues();
+        }
       }
     } else {
       current_led--;
       if (current_led <= 0) {
         current_led = 0;
         forward_direction = true;
+        
+        // Check for pending values when changing direction at the beginning
+        if (new_values_pending) {
+          applyPendingValues();
+        }
       }
     }
   }
 }
 
-// WebSocket event handler
-void webSocketEvent(WStype_t type, uint8_t * payload, size_t length) {
-  switch(type) {
-    case WStype_DISCONNECTED:
-      Serial.println(F("WebSocket disconnected"));
-      break;
-      
-    case WStype_CONNECTED:
-      Serial.println(F("WebSocket connected"));
-      // Send a message to the server
-      webSocket.sendTXT("ESP8266 LED control connected");
-      break;
-      
-    case WStype_TEXT:
-      Serial.printf("[WebSocket] Received: %s\n", payload);
-      
-      // Parse the incoming JSON
-      DynamicJsonDocument doc(256);
-      DeserializationError error = deserializeJson(doc, payload);
-      
-      if (error) {
-        Serial.println(F("Failed to parse JSON message"));
-        return;
-      }
-      
-      // Check for required parameters
-      if (!doc.containsKey("light_on") || 
-          !doc.containsKey("light_r") || 
-          !doc.containsKey("light_g") || 
-          !doc.containsKey("light_b") || 
-          !doc.containsKey("light_delay")) {
-        Serial.println(F("Missing required parameters"));
-        return;
-      }
-      
-      // Extract parameters
-      bool light_on_new = doc["light_on"];
-      int r = doc["light_r"];
-      int g = doc["light_g"];
-      int b = doc["light_b"];
-      int delay_val = doc["light_delay"];
-      
-      // Validate LED parameters
-      bool valid = validate_led_params(light_on_new, r, g, b, delay_val);
-      
-      if (valid) {
-        // Update global state variables
-        light_state = light_on_new;
-        light_r = r;
-        light_g = g;
-        light_b = b;
-        light_delay = delay_val;
-        
-        // Reset animation state if needed
-        if (light_on_new && !animation_active) {
-          current_led = 0;
-          forward_direction = true;
-        }
-        
-        // Send response back to server
-        webSocket.sendTXT("{\"status\":\"success\",\"message\":\"LED control updated\"}");
-      } else {
-        webSocket.sendTXT("{\"status\":\"error\",\"message\":\"Invalid parameters\"}");
-      }
-      break;
-  }
+void setup() {
+  Serial.begin(115200);
+  Serial.println("Starting EMDR Light Bar BLE Server...");
+
+  // Initialize LED strip
+  FastLED.addLeds<NEOPIXEL, LED_PIN>(leds, LED_COUNT);
+  FastLED.clear();             // Clear all LEDs
+  FastLED.show();              // Update LEDs with all off
+
+  BLEDevice::init(device_Name.c_str());
+  pServer = BLEDevice::createServer();
+  pServer->setCallbacks(new ServerCallbacks());
+
+  BLEService* pService = pServer->createService(LIGHTBAR_SERVICE_UUID);
+
+  // LED state characteristic
+  BLECharacteristic* pLedStateChar = pService->createCharacteristic(
+    LED_STATE_CHARACTERISTIC_UUID, BLECharacteristic::PROPERTY_WRITE);
+  pLedStateChar->setCallbacks(new LedStateCallback());
+
+  // LED color characteristic
+  BLECharacteristic* pLedColorChar = pService->createCharacteristic(
+    LED_COLOR_CHARACTERISTIC_UUID, BLECharacteristic::PROPERTY_WRITE);
+  pLedColorChar->setCallbacks(new LedColorCallback());
+
+  // LED delay characteristic
+  BLECharacteristic* pLedDelayChar = pService->createCharacteristic(
+    LED_DELAY_CHARACTERISTIC_UUID, BLECharacteristic::PROPERTY_WRITE);
+  pLedDelayChar->setCallbacks(new LedDelayCallback());
+
+  pService->start();
+
+  BLEAdvertising* pAdvertising = BLEDevice::getAdvertising();
+  pAdvertising->addServiceUUID(LIGHTBAR_SERVICE_UUID);
+  pAdvertising->setScanResponse(true);
+  pAdvertising->setMinPreferred(0x06);
+  pAdvertising->setMinPreferred(0x12);
+  BLEDevice::startAdvertising();
+
+  Serial.println("BLE server started and advertising...");
 }
 
-// Validate LED parameters
-bool validate_led_params(bool light_on, int r, int g, int b, int delay_val) {
-
-  if (light_on != 0 && light_on != 1) {
-    Serial.println(F("Invalid light status"));
-    return false;
-  }
-  // Check RGB ranges (0-255)
-  if (r < 0 || r > 255 || g < 0 || g > 255 || b < 0 || b > 255) {
-    Serial.println(F("Invalid RGB values"));
-    return false;
+void loop() {
+  // Update LED animation if active
+  if (light_state) {
+    update_led_animation();
   }
   
-  // Check delay range (5-75) and divisibility by 5
-  if (delay_val < 5 || delay_val > 75 || delay_val % 5 != 0) {
-    Serial.println(F("Invalid delay value"));
-    return false;
+  if (!deviceConnected) {
+    delay(500);
+    pServer->startAdvertising();
+    Serial.println("Restarting advertising");
   }
-  
-  return true;
 }
