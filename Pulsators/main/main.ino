@@ -1,147 +1,221 @@
-#include <ESP8266WiFi.h>
-#include <ArduinoJson.h>
-#include <ESP8266WebServer.h>
+#include "config.h"
+#include <BLE2902.h>
+#include <BLEUtils.h>
+#include <BLEDevice.h>
+#include <BLEServer.h>
 
-// WiFi credentials
-const char* ssid = "YourWiFiSSID";      // Replace with your WiFi SSID
-const char* password = "YourWiFiPassword"; // Replace with your WiFi password
-
-// Server setup
-ESP8266WebServer server(80);
+// BLE UUIDs
+#define PULSATOR_SERVICE_UUID "4fafc201-1fb5-459e-8fcc-c5c9c331914b"
+#define MOTOR_STATE_CHARACTERISTIC_UUID "668b943b-2cac-4de0-8091-332dedc91739"
+#define MOTOR_DELAY_CHARACTERISTIC_UUID "42621035-526f-4175-8ad0-16387b946fce"
+#define MOTOR_INTENSITY_CHARACTERISTIC_UUID "9f1dc367-ee23-4254-a52a-e41b59f50502"
 
 // Motor configuration
-#define MOTOR_PIN   2       // GPIO pin for motor control
-#define VALID_MOTOR_ID  1   // The valid motor ID
+const int MOTOR_PIN = 20;
 
 // Motor state variables
-bool motor_state = false;
-int motor_delay = 0;
-int motor_intensity = 0;
+bool motor_onPhase = true;
+uint8_t motor_state = 0;
+uint16_t motor_delay = 500;
+uint8_t motor_intensity = 150;
 unsigned long motor_lastToggle = 0;
 
-// Function prototypes
-bool motor_control(int motor_id, bool motor_on, int motor_delay, int motor_intensity);
-void handle_post_motor_control();
+// For handling new values between cycles
+bool new_values_pending = false;
+uint8_t new_motor_state = 0;
+uint16_t new_motor_delay = 500;
+uint8_t new_motor_intensity = 150;
+
+// BLE state
+bool deviceConnected = false;
+BLEServer* pServer = nullptr;
+
+// Apply new motor parameters after cycle
+void applyPendingValues() {
+  if (new_values_pending) {
+    Serial.println("Applying new motor parameters");
+
+    motor_state = new_motor_state;
+    motor_delay = new_motor_delay;
+    motor_intensity = new_motor_intensity;
+
+    if (!motor_state) {
+      analogWrite(MOTOR_PIN, 0);
+    } else {
+      motor_lastToggle = millis();
+      analogWrite(MOTOR_PIN, motor_intensity);
+      motor_onPhase = true;
+    }
+
+    new_values_pending = false;
+
+    Serial.println("Motor updated with new values");
+  }
+}
+
+// BLE Server callbacks
+class ServerCallbacks : public BLEServerCallbacks {
+  void onConnect(BLEServer* pServer) {
+    deviceConnected = true;
+    Serial.println("Device connected");
+  }
+
+  void onDisconnect(BLEServer* pServer) {
+    deviceConnected = false;
+    Serial.println("Device disconnected");
+  }
+};
+
+// Characteristic callbacks
+class MotorStateCallback : public BLECharacteristicCallbacks {
+  void onWrite(BLECharacteristic* pCharacteristic) {
+    uint8_t* data = pCharacteristic->getData();
+    if (data) {
+      uint8_t value = data[0];
+      Serial.print("Received motor state: ");
+      Serial.println(value);
+      if (value != 0 && value != 1) {
+        Serial.println("Invalid motor state");
+        return;
+      }
+
+      new_motor_state = value;
+      new_values_pending = true;
+      if (!motor_state) applyPendingValues();
+      else Serial.println("New motor state pending");
+    }
+  }
+};
+
+class MotorDelayCallback : public BLECharacteristicCallbacks {
+  void onWrite(BLECharacteristic* pCharacteristic) {
+    uint8_t* data = pCharacteristic->getData();
+    size_t length = pCharacteristic->getLength();
+
+    if (data && length == 2) {
+      // Parse big-endian uint16_t
+      uint16_t value = (data[0] << 8) | data[1];
+
+      Serial.print("Received motor delay: ");
+      Serial.println(value);
+
+      if (value < 100 || value > 1500) {
+        Serial.println("Invalid motor delay");
+        return;
+      }
+
+      new_motor_delay = value;
+      new_values_pending = true;
+      if (!motor_state) applyPendingValues();
+      else Serial.println("New motor delay pending");
+    }
+  }
+};
+
+class MotorIntensityCallback : public BLECharacteristicCallbacks {
+  void onWrite(BLECharacteristic* pCharacteristic) {
+    uint8_t* data = pCharacteristic->getData();
+    size_t length = pCharacteristic->getLength();
+
+    if (data && length == 1) {
+      uint8_t value = data[0];
+      Serial.print("Received motor intensity: ");
+      Serial.println(value);
+
+      if (value < 40 || value > 200) {
+        Serial.println("Invalid motor intensity");
+        return;
+      }
+
+      new_motor_intensity = value;
+      new_values_pending = true;
+      if (!motor_state) applyPendingValues();
+      else Serial.println("New motor intensity pending");
+    }
+  }
+};
 
 void setup() {
   Serial.begin(115200);
-  
-  // Initialize motor pin as output
+  Serial.println("Starting EMDR Pulsator BLE Server...");
+
   pinMode(MOTOR_PIN, OUTPUT);
-  digitalWrite(MOTOR_PIN, LOW);
-  
-  // Connect to WiFi
-  WiFi.begin(ssid, password);
-  Serial.print("Connecting to WiFi");
-  
-  while (WiFi.status() != WL_CONNECTED) {
-    delay(500);
-    Serial.print(".");
-  }
-  
-  Serial.println("");
-  Serial.println("WiFi connected");
-  Serial.print("IP address: ");
-  Serial.println(WiFi.localIP());
-  
-  // Set up server endpoint
-  server.on("/motor/control", HTTP_POST, handle_post_motor_control);
-  
-  // Start server
-  server.begin();
-  Serial.println("HTTP server started");
+  analogWrite(MOTOR_PIN, 0);
+
+  BLEDevice::init(device_Name.c_str());
+  pServer = BLEDevice::createServer();
+  pServer->setCallbacks(new ServerCallbacks());
+
+  BLEService* pService = pServer->createService(PULSATOR_SERVICE_UUID);
+
+  // Motor state characteristic
+  BLECharacteristic* pMotorStateChar = pService->createCharacteristic(
+    MOTOR_STATE_CHARACTERISTIC_UUID, BLECharacteristic::PROPERTY_WRITE);
+  pMotorStateChar->setCallbacks(new MotorStateCallback());
+
+  // Motor delay characteristic
+  BLECharacteristic* pMotorDelayChar = pService->createCharacteristic(
+    MOTOR_DELAY_CHARACTERISTIC_UUID, BLECharacteristic::PROPERTY_WRITE);
+  pMotorDelayChar->setCallbacks(new MotorDelayCallback());
+
+  // Motor intensity characteristic
+  BLECharacteristic* pMotorIntensityChar = pService->createCharacteristic(
+    MOTOR_INTENSITY_CHARACTERISTIC_UUID, BLECharacteristic::PROPERTY_WRITE);
+  pMotorIntensityChar->setCallbacks(new MotorIntensityCallback());
+
+  pService->start();
+
+  BLEAdvertising* pAdvertising = BLEDevice::getAdvertising();
+  pAdvertising->addServiceUUID(PULSATOR_SERVICE_UUID);
+  pAdvertising->setScanResponse(true);
+  pAdvertising->setMinPreferred(0x06);
+  pAdvertising->setMinPreferred(0x12);
+  BLEDevice::startAdvertising();
+
+  Serial.println("BLE server started and advertising...");
 }
 
 void loop() {
-  server.handleClient();
-  
-  // Handle motor cycling
+  while (!deviceConnected) {
+    delay(500);
+    pServer->startAdvertising();
+    Serial.println("Restarting advertising");
+  }
+
   if (motor_state) {
     unsigned long currentMillis = millis();
-    if (motor_delay > 0) {
-      if (currentMillis - motor_lastToggle >= motor_delay) {
-        motor_lastToggle = currentMillis;
-        // Toggle motor state
-        if (digitalRead(MOTOR_PIN) == HIGH) {
-          analogWrite(MOTOR_PIN, 0);  // Turn off
+    if (currentMillis - motor_lastToggle >= motor_delay) {
+      motor_lastToggle = currentMillis;
+
+      if (motor_id == 1) {
+        if (motor_onPhase) {
+          // When motor_onPhase is TRUE, this turns the motor ON
+          analogWrite(MOTOR_PIN, motor_intensity);
+          motor_onPhase = false;  // Prepare for next phase
         } else {
-          analogWrite(MOTOR_PIN, motor_intensity);  // Turn on with intensity
+          // When motor_onPhase is FALSE, this turns the motor OFF
+          analogWrite(MOTOR_PIN, 0);
+          motor_onPhase = true;  // Prepare for next phase
+
+          // Check for pending values only when turning OFF
+          if (new_values_pending) {
+            applyPendingValues();
+          }
+        }
+      } else {
+        if (motor_onPhase) {
+          analogWrite(MOTOR_PIN, 0);
+          motor_onPhase = false;  // Prepare for next phase
+        } else {
+          analogWrite(MOTOR_PIN, motor_intensity);
+          motor_onPhase = true;  // Prepare for next phase
+
+          // Check for pending values only when turning ON
+          if (new_values_pending) {
+            applyPendingValues();
+          }
         }
       }
     }
   }
-}
-
-// Handle POST request for motor control
-void handle_post_motor_control() {
-  if (server.hasArg("plain")) {
-    String body = server.arg("plain");
-    DynamicJsonDocument doc(1024);
-    DeserializationError error = deserializeJson(doc, body);
-
-    if (error) {
-      server.send(400, "application/json", "{\"status\":\"error\",\"message\":\"Invalid JSON\"}");
-      return;
-    }
-
-    // Extract parameters from JSON
-    if (!doc.containsKey("motor_id") || !doc.containsKey("motor_on") || 
-        !doc.containsKey("motor_delay") || !doc.containsKey("motor_intensity")) {
-      server.send(400, "application/json", "{\"status\":\"error\",\"message\":\"Missing required parameters\"}");
-      return;
-    }
-
-    int motor_id = doc["motor_id"];
-    bool motor_on = doc["motor_on"];
-    int motor_delay = doc["motor_delay"];
-    int motor_intensity = doc["motor_intensity"];
-
-    // Call the motor control function
-    bool success = motor_control(motor_id, motor_on, motor_delay, motor_intensity);
-    
-    if (success) {
-      server.send(200, "application/json", "{\"status\":\"success\",\"message\":\"Motor control updated\"}");
-    } else {
-      server.send(400, "application/json", "{\"status\":\"error\",\"message\":\"Invalid parameters\"}");
-    }
-  } else {
-    server.send(400, "application/json", "{\"status\":\"error\",\"message\":\"No body provided\"}");
-  }
-}
-
-// Motor control function that validates and applies motor settings
-bool motor_control(int motor_id, bool motor_on, int motor_delay, int motor_intensity) {
-  // Validate motor_id
-  if (motor_id != VALID_MOTOR_ID) {
-    Serial.println("Invalid motor ID");
-    return false;
-  }
-  
-  // Validate ranges
-  if (motor_delay < 100 || motor_delay > 1500) {
-    Serial.println("Invalid motor speed");
-    return false;
-  }
-  
-  if (motor_intensity < 40 || motor_intensity > 200) {
-    Serial.println("Invalid motor intensity");
-    return false;
-  }
-  
-  // Apply settings to the motor
-  motor_state = motor_on;
-  motor_delay = motor_delay;
-  motor_intensity = motor_intensity;
-  
-  if (!motor_on) {
-    analogWrite(MOTOR_PIN, 0);  // Turn off the motor immediately if motor_on is false
-  } else {
-    // Reset the toggle timer to start a new cycle
-    motor_lastToggle = millis();
-    analogWrite(MOTOR_PIN, motor_intensity);  // Start with the motor on
-  }
-  
-  Serial.println("Motor updated");
-  
-  return true;
 }
