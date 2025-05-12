@@ -5,16 +5,16 @@
 #include <BLEServer.h>
 
 // BLE UUIDs
-#define PULSATOR_SERVICE_UUID              "4fafc201-1fb5-459e-8fcc-c5c9c331914b"
-#define MOTOR_STATE_CHARACTERISTIC_UUID    "668b943b-2cac-4de0-8091-332dedc91739"
-#define MOTOR_DELAY_CHARACTERISTIC_UUID    "42621035-526f-4175-8ad0-16387b946fce"
+#define PULSATOR_SERVICE_UUID "4fafc201-1fb5-459e-8fcc-c5c9c331914b"
+#define MOTOR_STATE_CHARACTERISTIC_UUID "668b943b-2cac-4de0-8091-332dedc91739"
+#define MOTOR_DELAY_CHARACTERISTIC_UUID "42621035-526f-4175-8ad0-16387b946fce"
 #define MOTOR_INTENSITY_CHARACTERISTIC_UUID "9f1dc367-ee23-4254-a52a-e41b59f50502"
 
 // Motor configuration
 const int MOTOR_PIN = 20;
 
 // Motor state variables
-bool motor_onPhase = false;
+bool motor_onPhase = true;
 uint8_t motor_state = 0;
 uint16_t motor_delay = 500;
 uint8_t motor_intensity = 150;
@@ -134,7 +134,7 @@ void setup() {
   pinMode(MOTOR_PIN, OUTPUT);
   analogWrite(MOTOR_PIN, 0);
 
-  BLEDevice::init("EMDR_Pulsator");
+  BLEDevice::init(device_Name.c_str());
   pServer = BLEDevice::createServer();
   pServer->setCallbacks(new ServerCallbacks());
 
@@ -173,20 +173,38 @@ void loop() {
     if (currentMillis - motor_lastToggle >= motor_delay) {
       motor_lastToggle = currentMillis;
 
-      if (motor_onPhase) {
-        analogWrite(MOTOR_PIN, 0);
-        motor_onPhase = false;
+      if (motor_id == 1) {
+        if (motor_onPhase) {
+          // When motor_onPhase is TRUE, this turns the motor ON
+          analogWrite(MOTOR_PIN, motor_intensity);
+          motor_onPhase = false;  // Prepare for next phase
+        } else {
+          // When motor_onPhase is FALSE, this turns the motor OFF
+          analogWrite(MOTOR_PIN, 0);
+          motor_onPhase = true;  // Prepare for next phase
 
-        if (new_values_pending) {
-          applyPendingValues();
+          // Check for pending values only when turning OFF
+          if (new_values_pending) {
+            applyPendingValues();
+          }
         }
       } else {
-        analogWrite(MOTOR_PIN, motor_intensity);
-        motor_onPhase = true;
+        if (motor_onPhase) {
+          analogWrite(MOTOR_PIN, 0);
+          motor_onPhase = false;  // Prepare for next phase
+        } else {
+          analogWrite(MOTOR_PIN, motor_intensity);
+          motor_onPhase = true;  // Prepare for next phase
+
+          // Check for pending values only when turning ON
+          if (new_values_pending) {
+            applyPendingValues();
+          }
+        }
       }
     }
   }
-
+  
   if (!deviceConnected) {
     delay(500);
     pServer->startAdvertising();
