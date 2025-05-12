@@ -90,12 +90,17 @@ class MotorStateCallback : public BLECharacteristicCallbacks {
 class MotorDelayCallback : public BLECharacteristicCallbacks {
   void onWrite(BLECharacteristic* pCharacteristic) {
     uint8_t* data = pCharacteristic->getData();
-    if (data) {
-      uint16_t value = *(uint16_t*)data;
+    size_t length = pCharacteristic->getLength();
+
+    if (data && length == 2) {
+      // Parse big-endian uint16_t
+      uint16_t value = (data[0] << 8) | data[1];
+
       Serial.print("Received motor delay: ");
       Serial.println(value);
+
       if (value < 100 || value > 1500) {
-        Serial.println("Invalid motor speed");
+        Serial.println("Invalid motor delay");
         return;
       }
 
@@ -110,10 +115,13 @@ class MotorDelayCallback : public BLECharacteristicCallbacks {
 class MotorIntensityCallback : public BLECharacteristicCallbacks {
   void onWrite(BLECharacteristic* pCharacteristic) {
     uint8_t* data = pCharacteristic->getData();
-    if (data) {
+    size_t length = pCharacteristic->getLength();
+
+    if (data && length == 1) {
       uint8_t value = data[0];
       Serial.print("Received motor intensity: ");
       Serial.println(value);
+
       if (value < 40 || value > 200) {
         Serial.println("Invalid motor intensity");
         return;
@@ -168,6 +176,12 @@ void setup() {
 }
 
 void loop() {
+  while (!deviceConnected) {
+    delay(500);
+    pServer->startAdvertising();
+    Serial.println("Restarting advertising");
+  }
+
   if (motor_state) {
     unsigned long currentMillis = millis();
     if (currentMillis - motor_lastToggle >= motor_delay) {
@@ -203,11 +217,5 @@ void loop() {
         }
       }
     }
-  }
-  
-  if (!deviceConnected) {
-    delay(500);
-    pServer->startAdvertising();
-    Serial.println("Restarting advertising");
   }
 }

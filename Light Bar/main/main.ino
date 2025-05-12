@@ -6,9 +6,9 @@
 #include <BLEServer.h>
 
 // LED Strip configuration
-#define LED_PIN      2      // GPIO pin connected to the LED strip
-#define LED_COUNT   20      // Number of LEDs in the strip
-CRGB leds[LED_COUNT];       // Define the LED strip array
+#define LED_PIN 2      // GPIO pin connected to the LED strip
+#define LED_COUNT 20   // Number of LEDs in the strip
+CRGB leds[LED_COUNT];  // Define the LED strip array
 
 // BLE UUIDs
 #define LIGHTBAR_SERVICE_UUID "1fb5c201-4faf-459e-8fcc-c5c9c331914b"
@@ -106,13 +106,13 @@ class LedStateCallback : public BLECharacteristicCallbacks {
 class LedColorCallback : public BLECharacteristicCallbacks {
   void onWrite(BLECharacteristic* pCharacteristic) {
     uint8_t* data = pCharacteristic->getData();
-    if (data && pCharacteristic->getLength() >= 3) {
-      int r = data[0];
-      int g = data[1];
-      int b = data[2];
+    if (data && pCharacteristic->getLength() == 3) {
+      uint8_t r = data[0];
+      uint8_t g = data[1];
+      uint8_t b = data[2];
       Serial.printf("Received LED color: R=%d, G=%d, B=%d\n", r, g, b);
-      
-      if (r < 0 || r > 255 || g < 0 || g > 255 || b < 0 || b > 255) {
+
+      if (r > 255 || g > 255 || b > 255) {
         Serial.println("Invalid RGB values");
         return;
       }
@@ -151,29 +151,29 @@ class LedDelayCallback : public BLECharacteristicCallbacks {
 // Non-blocking LED animation update
 void update_led_animation() {
   unsigned long current_time = millis();
-  
+
   // Only update if enough time has passed
   if (current_time - last_led_update >= light_delay) {
     last_led_update = current_time;
     animation_active = true;
-    
+
     // Clear all LEDs
     FastLED.clear();
-    
+
     // Set the current LED color
     CRGB color = CRGB(light_r, light_g, light_b);
     leds[current_led] = color;
-    
+
     // Update the display
     FastLED.show();
-    
+
     // Calculate next LED position
     if (forward_direction) {
       current_led++;
       if (current_led >= LED_COUNT - 1) {
         current_led = LED_COUNT - 1;
         forward_direction = false;
-        
+
         // Check for pending values when changing direction at the end
         if (new_values_pending) {
           applyPendingValues();
@@ -184,7 +184,7 @@ void update_led_animation() {
       if (current_led <= 0) {
         current_led = 0;
         forward_direction = true;
-        
+
         // Check for pending values when changing direction at the beginning
         if (new_values_pending) {
           applyPendingValues();
@@ -200,8 +200,8 @@ void setup() {
 
   // Initialize LED strip
   FastLED.addLeds<NEOPIXEL, LED_PIN>(leds, LED_COUNT);
-  FastLED.clear();             // Clear all LEDs
-  FastLED.show();              // Update LEDs with all off
+  FastLED.clear();  // Clear all LEDs
+  FastLED.show();   // Update LEDs with all off
 
   BLEDevice::init(device_Name.c_str());
   pServer = BLEDevice::createServer();
@@ -241,7 +241,7 @@ void loop() {
   if (light_state) {
     update_led_animation();
   }
-  
+
   if (!deviceConnected) {
     delay(500);
     pServer->startAdvertising();
