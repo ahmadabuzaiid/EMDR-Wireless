@@ -1,4 +1,3 @@
-#include "config.h"
 #include <FastLED.h>
 #include <BLE2902.h>
 #include <BLEUtils.h>
@@ -15,30 +14,47 @@ CRGB leds[LED_COUNT];  // Define the LED strip array
 #define LED_STATE_CHARACTERISTIC_UUID "2cac943b-668b-4de0-8091-332dedc91739"
 #define LED_COLOR_CHARACTERISTIC_UUID "526f1035-4262-4175-8ad0-16387b946fce"
 #define LED_DELAY_CHARACTERISTIC_UUID "ee231dc3-9f67-4254-a52a-e41b59f50502"
+#define LED_SYNC_CHARACTERISTIC_UUID "822ff8ad-58e1-44f8-8cb5-f4048a0ee3c3"
+
+// Advertised BLE name. The companion app scans for exactly this name (see
+// EmdrWirelessApp) - there's only ever one Light Bar per kit, so this rarely
+// needs to change, but keeping it here (not in a separate config file) keeps
+// every per-device setting in one visible place across both sketches.
+const String DEVICE_NAME = "Light Bar";
+
+// LED defaults
+const uint8_t DEFAULT_LIGHT_R = 0;
+const uint8_t DEFAULT_LIGHT_G = 0;
+const uint8_t DEFAULT_LIGHT_B = 0;
+const uint8_t DEFAULT_LIGHT_DELAY = 20;
+
+// Cap how much a single resync can pull the animation timing in, so a step is never
+// abruptly cut short/stretched enough for the patient to notice
+const uint8_t SYNC_MAX_CORRECTION_PERCENT = 20;
 
 // LED state variables
-uint8_t light_state = 0;
-uint8_t light_r = 0;
-uint8_t light_g = 0;
-uint8_t light_b = 0;
-inuint8_tt light_delay = 20;
+volatile uint8_t light_state = 0;
+volatile uint8_t light_r = DEFAULT_LIGHT_R;
+volatile uint8_t light_g = DEFAULT_LIGHT_G;
+volatile uint8_t light_b = DEFAULT_LIGHT_B;
+volatile uint8_t light_delay = DEFAULT_LIGHT_DELAY;
 
 // Animation control variables
-int current_led = 0;
-bool forward_direction = true;
-unsigned long last_led_update = 0;
-bool animation_active = false;
+volatile int current_led = 0;
+volatile bool forward_direction = true;
+volatile unsigned long last_led_update = 0;
+volatile bool animation_active = false;
 
 // For handling new values between cycles
-bool new_values_pending = false;
-uint8_t new_light_state = 0;
-uint8_t new_light_r = 0;
-uint8_t new_light_g = 0;
-uint8_t new_light_b = 0;
-uint8_t new_light_delay = 20;
+volatile bool new_values_pending = false;
+volatile uint8_t new_light_state = 0;
+volatile uint8_t new_light_r = DEFAULT_LIGHT_R;
+volatile uint8_t new_light_g = DEFAULT_LIGHT_G;
+volatile uint8_t new_light_b = DEFAULT_LIGHT_B;
+volatile uint8_t new_light_delay = DEFAULT_LIGHT_DELAY;
 
 // BLE state
-bool deviceConnected = false;
+volatile bool deviceConnected = false;
 BLEServer* pServer = nullptr;
 
 // Apply new LED parameters after cycle
@@ -77,7 +93,26 @@ class ServerCallbacks : public BLEServerCallbacks {
 
   void onDisconnect(BLEServer* pServer) {
     deviceConnected = false;
-    Serial.println("Device disconnected");
+
+    // Stop the animation and reset to defaults so a new connection always starts from a clean, known state
+    light_state = 0;
+    light_r = DEFAULT_LIGHT_R;
+    light_g = DEFAULT_LIGHT_G;
+    light_b = DEFAULT_LIGHT_B;
+    light_delay = DEFAULT_LIGHT_DELAY;
+    current_led = 0;
+    forward_direction = true;
+    animation_active = false;
+    new_light_state = 0;
+    new_light_r = DEFAULT_LIGHT_R;
+    new_light_g = DEFAULT_LIGHT_G;
+    new_light_b = DEFAULT_LIGHT_B;
+    new_light_delay = DEFAULT_LIGHT_DELAY;
+    new_values_pending = false;
+    FastLED.clear();
+    FastLED.show();
+
+    Serial.println("Device disconnected, LEDs stopped and reset");
   }
 };
 
@@ -85,7 +120,7 @@ class ServerCallbacks : public BLEServerCallbacks {
 class LedStateCallback : public BLECharacteristicCallbacks {
   void onWrite(BLECharacteristic* pCharacteristic) {
     uint8_t* data = pCharacteristic->getData();
-    if (data) {
+    if (data && pCharacteristic->getLength() == 1) {
       uint8_t value = data[0];
       Serial.print("Received LED state: ");
       Serial.println(value);
@@ -96,7 +131,8 @@ class LedStateCallback : public BLECharacteristicCallbacks {
 
       new_light_state = value;
       new_values_pending = true;
-      if (!light_state || !animation_active) applyPendingValues();
+      // Turning off shouldn't wait for the sweep to reach an end
+      if (!light_state || !animation_active || !value) applyPendingValues();
       else Serial.println("New LED state pending");
     }
   }
@@ -112,11 +148,6 @@ class LedColorCallback : public BLECharacteristicCallbacks {
       uint8_t b = data[2];
       Serial.printf("Received LED color: R=%d, G=%d, B=%d\n", r, g, b);
 
-      if (r > 255 || g > 255 || b > 255) {
-        Serial.println("Invalid RGB values");
-        return;
-      }
-
       new_light_r = r;
       new_light_g = g;
       new_light_b = b;
@@ -131,7 +162,7 @@ class LedColorCallback : public BLECharacteristicCallbacks {
 class LedDelayCallback : public BLECharacteristicCallbacks {
   void onWrite(BLECharacteristic* pCharacteristic) {
     uint8_t* data = pCharacteristic->getData();
-    if (data) {
+    if (data && pCharacteristic->getLength() == 1) {
       uint8_t value = data[0];
       Serial.print("Received LED delay: ");
       Serial.println(value);
@@ -194,6 +225,27 @@ void update_led_animation() {
   }
 }
 
+// Periodic resync trigger: nudges the animation's step timing toward "a step boundary
+// is happening now" instead of snapping to it, so repeated pings gradually converge
+// the light bar's cadence with the pulsators without ever visibly skipping a step.
+class LedSyncCallback : public BLECharacteristicCallbacks {
+  void onWrite(BLECharacteristic* pCharacteristic) {
+    if (!light_state || !animation_active) return;  // nothing running, nothing to sync
+
+    unsigned long now = millis();
+    unsigned long elapsed = now - last_led_update;
+    unsigned long maxCorrection = (uint32_t)light_delay * SYNC_MAX_CORRECTION_PERCENT / 100;
+    if (maxCorrection < 1) maxCorrection = 1;
+    unsigned long correction = (elapsed < maxCorrection) ? elapsed : maxCorrection;
+
+    last_led_update -= correction;
+
+    Serial.print("Resync: nudged LED phase by ");
+    Serial.print(correction);
+    Serial.println("ms");
+  }
+};
+
 void setup() {
   Serial.begin(115200);
   Serial.println("Starting EMDR Light Bar BLE Server...");
@@ -203,7 +255,7 @@ void setup() {
   FastLED.clear();  // Clear all LEDs
   FastLED.show();   // Update LEDs with all off
 
-  BLEDevice::init(device_Name.c_str());
+  BLEDevice::init(DEVICE_NAME.c_str());
   pServer = BLEDevice::createServer();
   pServer->setCallbacks(new ServerCallbacks());
 
@@ -224,13 +276,18 @@ void setup() {
     LED_DELAY_CHARACTERISTIC_UUID, BLECharacteristic::PROPERTY_WRITE);
   pLedDelayChar->setCallbacks(new LedDelayCallback());
 
+  // LED sync characteristic (write-without-response for minimal latency)
+  BLECharacteristic* pLedSyncChar = pService->createCharacteristic(
+    LED_SYNC_CHARACTERISTIC_UUID, BLECharacteristic::PROPERTY_WRITE | BLECharacteristic::PROPERTY_WRITE_NR);
+  pLedSyncChar->setCallbacks(new LedSyncCallback());
+
   pService->start();
 
   BLEAdvertising* pAdvertising = BLEDevice::getAdvertising();
   pAdvertising->addServiceUUID(LIGHTBAR_SERVICE_UUID);
   pAdvertising->setScanResponse(true);
-  pAdvertising->setMinPreferred(0x06);
-  pAdvertising->setMinPreferred(0x12);
+  pAdvertising->setMinPreferred(0x06);  // 7.5ms
+  pAdvertising->setMaxPreferred(0x12);  // 22.5ms
   BLEDevice::startAdvertising();
 
   Serial.println("BLE server started and advertising...");
