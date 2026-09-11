@@ -5,22 +5,29 @@
 // characteristic UUIDs, same write validation rules - see "Light Bar/main/main.ino"),
 // so the EmdrWirelessApp can connect to it with zero changes. There's no LED strip
 // here though - every characteristic write is instead reflected on the ESP32-C3
-// SuperMini's own built-in addressable RGB LED (a single WS2812 pixel on GPIO8),
-// purely so you can visually confirm the app <-> chip communication works without
-// having the real strip wired up. No sweep animation, no drift correction - those
-// only make sense across a real multi-LED strip.
+// SuperMini's own built-in LED, purely so you can visually confirm the app <-> chip
+// communication works without having the real strip wired up.
+//
+// The built-in LED on this board turned out to be a PLAIN single LED (confirmed by
+// testing - not the WS2812 addressable RGB pixel some SuperMini variants have), so
+// it can't display arbitrary colors. It's driven with plain PWM instead: color
+// writes are reflected as brightness (perceived luminance of the RGB value), state
+// on/off is on/off, and delay/sync writes still get their own distinct blink pattern.
+// No sweep animation, no drift correction - those only make sense across a real
+// multi-LED strip.
 // ============================================================================
 
-#include <FastLED.h>
 #include <BLE2902.h>
 #include <BLEUtils.h>
 #include <BLEDevice.h>
 #include <BLEServer.h>
 
-// Built-in LED: ESP32-C3 SuperMini has a single WS2812 pixel on GPIO8.
+// Built-in LED: a plain PWM-driven LED on GPIO8 (confirmed by testing - this board
+// does not have the addressable WS2812 pixel some ESP32-C3 SuperMini variants do).
 #define LED_PIN 8
-#define LED_COUNT 1
-CRGB leds[LED_COUNT];
+// Most SuperMini onboard LEDs are wired active-low (LOW = on). If state=1 doesn't
+// turn the LED on, flip this.
+const bool LED_ACTIVE_LOW = true;
 
 // BLE UUIDs - identical to the real Light Bar, so the app doesn't need to know
 // it's talking to a test rig instead of the real hardware.
@@ -40,7 +47,7 @@ const uint8_t DEFAULT_LIGHT_R = 0;
 const uint8_t DEFAULT_LIGHT_G = 0;
 const uint8_t DEFAULT_LIGHT_B = 0;
 const uint8_t DEFAULT_LIGHT_DELAY = 20;
-const uint8_t ACK_BRIGHTNESS = 40; // dim, so ack blinks don't blind you at close range
+const uint8_t ACK_BRIGHTNESS = 60; // dim-ish, so ack blinks are visible but not blinding
 
 // Current state - every write below applies immediately since there's no
 // animation cycle here to protect from a mid-cycle interruption.
@@ -53,24 +60,29 @@ uint8_t light_delay = DEFAULT_LIGHT_DELAY;
 volatile bool deviceConnected = false;
 BLEServer* pServer = nullptr;
 
+// Sets the plain LED's brightness (0-255), accounting for active-low wiring.
+void setLedLevel(uint8_t brightness) {
+  analogWrite(LED_PIN, LED_ACTIVE_LOW ? (255 - brightness) : brightness);
+}
+
+// Perceived-luminance approximation (0.299R + 0.587G + 0.114B in fixed point),
+// so a color write is reflected as "how bright would this color look" rather
+// than picking one channel arbitrarily.
+uint8_t colorToBrightness(uint8_t r, uint8_t g, uint8_t b) {
+  return (uint8_t)(((uint16_t)r * 77 + (uint16_t)g * 151 + (uint16_t)b * 28) >> 8);
+}
+
 void showCurrentState() {
-  if (light_state) {
-    leds[0] = CRGB(light_r, light_g, light_b);
-  } else {
-    leds[0] = CRGB::Black;
-  }
-  FastLED.show();
+  setLedLevel(light_state ? colorToBrightness(light_r, light_g, light_b) : 0);
 }
 
 // Brief blink(s) to acknowledge a write that has no natural steady-state visual
 // of its own (delay/sync), then restores whatever was showing before.
 void blinkAck(uint8_t times) {
   for (uint8_t i = 0; i < times; i++) {
-    leds[0] = CRGB(ACK_BRIGHTNESS, ACK_BRIGHTNESS, ACK_BRIGHTNESS);
-    FastLED.show();
+    setLedLevel(ACK_BRIGHTNESS);
     delay(80);
-    leds[0] = CRGB::Black;
-    FastLED.show();
+    setLedLevel(0);
     delay(80);
   }
   showCurrentState();
@@ -146,7 +158,7 @@ class LedDelayCallback : public BLECharacteristicCallbacks {
       }
 
       light_delay = value;
-      blinkAck(2); // two quick white blinks = "delay received"
+      blinkAck(2); // two quick blinks = "delay received"
     }
   }
 };
@@ -154,7 +166,7 @@ class LedDelayCallback : public BLECharacteristicCallbacks {
 class LedSyncCallback : public BLECharacteristicCallbacks {
   void onWrite(BLECharacteristic* pCharacteristic) {
     Serial.println("Received LED sync ping");
-    blinkAck(1); // one quick white blink = "sync ping received"
+    blinkAck(1); // one quick blink = "sync ping received"
   }
 };
 
@@ -162,7 +174,7 @@ void setup() {
   Serial.begin(115200);
   Serial.println("Starting Light Bar BLE TEST RIG (built-in LED only)...");
 
-  FastLED.addLeds<NEOPIXEL, LED_PIN>(leds, LED_COUNT);
+  pinMode(LED_PIN, OUTPUT);
   showCurrentState();
 
   BLEDevice::init(DEVICE_NAME.c_str());
