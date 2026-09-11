@@ -1,4 +1,3 @@
-#include "config.h"
 #include <BLE2902.h>
 #include <BLEUtils.h>
 #include <BLEDevice.h>
@@ -7,51 +6,26 @@
 // BLE UUIDs
 #define PULSATOR_SERVICE_UUID "4fafc201-1fb5-459e-8fcc-c5c9c331914b"
 #define MOTOR_STATE_CHARACTERISTIC_UUID "668b943b-2cac-4de0-8091-332dedc91739"
-#define MOTOR_DELAY_CHARACTERISTIC_UUID "42621035-526f-4175-8ad0-16387b946fce"
 #define MOTOR_INTENSITY_CHARACTERISTIC_UUID "9f1dc367-ee23-4254-a52a-e41b59f50502"
+
+// Advertised BLE name. The two pulsators run this exact same sketch - change this
+// to "Pulsator 1" or "Pulsator 2" to match whichever physical unit you're flashing.
+// The companion app tells the two apart only by this name (see EmdrWirelessApp).
+const String DEVICE_NAME = "Pulsator 1";
 
 // Motor configuration
 const int MOTOR_PIN = 20;
+const uint8_t DEFAULT_MOTOR_INTENSITY = 150;
 
-// Motor state variables
-bool motor_onPhase = true;
-uint8_t motor_state = 0;
-uint16_t motor_delay = 500;
-uint8_t motor_intensity = 150;
-unsigned long motor_lastToggle = 0;
-
-// For handling new values between cycles
-bool new_values_pending = false;
-uint8_t new_motor_state = 0;
-uint16_t new_motor_delay = 500;
-uint8_t new_motor_intensity = 150;
+// Motor state: the app is the clock in this design (it computes when to buzz, whether
+// synced to the Light Bar or run standalone) and drives the motor live via MOTOR_STATE.
+// The firmware just reacts to whatever it's told, immediately, with no local cycle timer.
+volatile uint8_t motor_state = 0;
+volatile uint8_t motor_intensity = DEFAULT_MOTOR_INTENSITY;
 
 // BLE state
-bool deviceConnected = false;
+volatile bool deviceConnected = false;
 BLEServer* pServer = nullptr;
-
-// Apply new motor parameters after cycle
-void applyPendingValues() {
-  if (new_values_pending) {
-    Serial.println("Applying new motor parameters");
-
-    motor_state = new_motor_state;
-    motor_delay = new_motor_delay;
-    motor_intensity = new_motor_intensity;
-
-    if (!motor_state) {
-      analogWrite(MOTOR_PIN, 0);
-    } else {
-      motor_lastToggle = millis();
-      analogWrite(MOTOR_PIN, motor_intensity);
-      motor_onPhase = true;
-    }
-
-    new_values_pending = false;
-
-    Serial.println("Motor updated with new values");
-  }
-}
 
 // BLE Server callbacks
 class ServerCallbacks : public BLEServerCallbacks {
@@ -62,15 +36,21 @@ class ServerCallbacks : public BLEServerCallbacks {
 
   void onDisconnect(BLEServer* pServer) {
     deviceConnected = false;
-    Serial.println("Device disconnected");
+
+    // Stop the motor and reset to defaults so a new connection always starts from a clean, known state
+    motor_state = 0;
+    motor_intensity = DEFAULT_MOTOR_INTENSITY;
+    analogWrite(MOTOR_PIN, 0);
+
+    Serial.println("Device disconnected, motor stopped and reset");
   }
 };
 
-// Characteristic callbacks
+// Motor state characteristic callback - applies immediately, this is the live "buzz now" trigger
 class MotorStateCallback : public BLECharacteristicCallbacks {
   void onWrite(BLECharacteristic* pCharacteristic) {
     uint8_t* data = pCharacteristic->getData();
-    if (data) {
+    if (data && pCharacteristic->getLength() == 1) {
       uint8_t value = data[0];
       Serial.print("Received motor state: ");
       Serial.println(value);
@@ -79,45 +59,17 @@ class MotorStateCallback : public BLECharacteristicCallbacks {
         return;
       }
 
-      new_motor_state = value;
-      new_values_pending = true;
-      if (!motor_state) applyPendingValues();
-      else Serial.println("New motor state pending");
+      motor_state = value;
+      analogWrite(MOTOR_PIN, motor_state ? motor_intensity : 0);
     }
   }
 };
 
-class MotorDelayCallback : public BLECharacteristicCallbacks {
-  void onWrite(BLECharacteristic* pCharacteristic) {
-    uint8_t* data = pCharacteristic->getData();
-    size_t length = pCharacteristic->getLength();
-
-    if (data && length == 2) {
-      // Parse big-endian uint16_t
-      uint16_t value = (data[0] << 8) | data[1];
-
-      Serial.print("Received motor delay: ");
-      Serial.println(value);
-
-      if (value < 100 || value > 1500) {
-        Serial.println("Invalid motor delay");
-        return;
-      }
-
-      new_motor_delay = value;
-      new_values_pending = true;
-      if (!motor_state) applyPendingValues();
-      else Serial.println("New motor delay pending");
-    }
-  }
-};
-
+// Motor intensity characteristic callback - applies immediately
 class MotorIntensityCallback : public BLECharacteristicCallbacks {
   void onWrite(BLECharacteristic* pCharacteristic) {
     uint8_t* data = pCharacteristic->getData();
-    size_t length = pCharacteristic->getLength();
-
-    if (data && length == 1) {
+    if (data && pCharacteristic->getLength() == 1) {
       uint8_t value = data[0];
       Serial.print("Received motor intensity: ");
       Serial.println(value);
@@ -127,10 +79,8 @@ class MotorIntensityCallback : public BLECharacteristicCallbacks {
         return;
       }
 
-      new_motor_intensity = value;
-      new_values_pending = true;
-      if (!motor_state) applyPendingValues();
-      else Serial.println("New motor intensity pending");
+      motor_intensity = value;
+      if (motor_state) analogWrite(MOTOR_PIN, motor_intensity);
     }
   }
 };
@@ -142,7 +92,7 @@ void setup() {
   pinMode(MOTOR_PIN, OUTPUT);
   analogWrite(MOTOR_PIN, 0);
 
-  BLEDevice::init(device_Name.c_str());
+  BLEDevice::init(DEVICE_NAME.c_str());
   pServer = BLEDevice::createServer();
   pServer->setCallbacks(new ServerCallbacks());
 
@@ -150,13 +100,8 @@ void setup() {
 
   // Motor state characteristic
   BLECharacteristic* pMotorStateChar = pService->createCharacteristic(
-    MOTOR_STATE_CHARACTERISTIC_UUID, BLECharacteristic::PROPERTY_WRITE);
+    MOTOR_STATE_CHARACTERISTIC_UUID, BLECharacteristic::PROPERTY_WRITE | BLECharacteristic::PROPERTY_WRITE_NR);
   pMotorStateChar->setCallbacks(new MotorStateCallback());
-
-  // Motor delay characteristic
-  BLECharacteristic* pMotorDelayChar = pService->createCharacteristic(
-    MOTOR_DELAY_CHARACTERISTIC_UUID, BLECharacteristic::PROPERTY_WRITE);
-  pMotorDelayChar->setCallbacks(new MotorDelayCallback());
 
   // Motor intensity characteristic
   BLECharacteristic* pMotorIntensityChar = pService->createCharacteristic(
@@ -168,8 +113,8 @@ void setup() {
   BLEAdvertising* pAdvertising = BLEDevice::getAdvertising();
   pAdvertising->addServiceUUID(PULSATOR_SERVICE_UUID);
   pAdvertising->setScanResponse(true);
-  pAdvertising->setMinPreferred(0x06);
-  pAdvertising->setMinPreferred(0x12);
+  pAdvertising->setMinPreferred(0x06);  // 7.5ms
+  pAdvertising->setMaxPreferred(0x12);  // 22.5ms
   BLEDevice::startAdvertising();
 
   Serial.println("BLE server started and advertising...");
@@ -180,42 +125,5 @@ void loop() {
     delay(500);
     pServer->startAdvertising();
     Serial.println("Restarting advertising");
-  }
-
-  if (motor_state) {
-    unsigned long currentMillis = millis();
-    if (currentMillis - motor_lastToggle >= motor_delay) {
-      motor_lastToggle = currentMillis;
-
-      if (motor_id == 1) {
-        if (motor_onPhase) {
-          // When motor_onPhase is TRUE, this turns the motor ON
-          analogWrite(MOTOR_PIN, motor_intensity);
-          motor_onPhase = false;  // Prepare for next phase
-        } else {
-          // When motor_onPhase is FALSE, this turns the motor OFF
-          analogWrite(MOTOR_PIN, 0);
-          motor_onPhase = true;  // Prepare for next phase
-
-          // Check for pending values only when turning OFF
-          if (new_values_pending) {
-            applyPendingValues();
-          }
-        }
-      } else {
-        if (motor_onPhase) {
-          analogWrite(MOTOR_PIN, 0);
-          motor_onPhase = false;  // Prepare for next phase
-        } else {
-          analogWrite(MOTOR_PIN, motor_intensity);
-          motor_onPhase = true;  // Prepare for next phase
-
-          // Check for pending values only when turning ON
-          if (new_values_pending) {
-            applyPendingValues();
-          }
-        }
-      }
-    }
   }
 }

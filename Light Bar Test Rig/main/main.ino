@@ -1,0 +1,208 @@
+// ============================================================================
+// LIGHT BAR - BLE COMMUNICATION TEST RIG (NOT the real firmware)
+// ============================================================================
+// Advertises itself exactly like the real Light Bar (same name, same service/
+// characteristic UUIDs, same write validation rules - see "Light Bar/main/main.ino"),
+// so the EmdrWirelessApp can connect to it with zero changes. There's no LED strip
+// here though - every characteristic write is instead reflected on the ESP32-C3
+// SuperMini's own built-in addressable RGB LED (a single WS2812 pixel on GPIO8),
+// purely so you can visually confirm the app <-> chip communication works without
+// having the real strip wired up. No sweep animation, no drift correction - those
+// only make sense across a real multi-LED strip.
+// ============================================================================
+
+#include <FastLED.h>
+#include <BLE2902.h>
+#include <BLEUtils.h>
+#include <BLEDevice.h>
+#include <BLEServer.h>
+
+// Built-in LED: ESP32-C3 SuperMini has a single WS2812 pixel on GPIO8.
+#define LED_PIN 8
+#define LED_COUNT 1
+CRGB leds[LED_COUNT];
+
+// BLE UUIDs - identical to the real Light Bar, so the app doesn't need to know
+// it's talking to a test rig instead of the real hardware.
+#define LIGHTBAR_SERVICE_UUID "1fb5c201-4faf-459e-8fcc-c5c9c331914b"
+#define LED_STATE_CHARACTERISTIC_UUID "2cac943b-668b-4de0-8091-332dedc91739"
+#define LED_COLOR_CHARACTERISTIC_UUID "526f1035-4262-4175-8ad0-16387b946fce"
+#define LED_DELAY_CHARACTERISTIC_UUID "ee231dc3-9f67-4254-a52a-e41b59f50502"
+#define LED_SYNC_CHARACTERISTIC_UUID "822ff8ad-58e1-44f8-8cb5-f4048a0ee3c3"
+
+// Advertised BLE name - must match what the app scans for. If you're also running
+// a real Light Bar nearby, having two devices advertise the same name is fine (the
+// app connects to whichever has the stronger signal) but can be confusing - consider
+// temporarily renaming this one, e.g. "Light Bar Test", while debugging.
+const String DEVICE_NAME = "Light Bar";
+
+const uint8_t DEFAULT_LIGHT_R = 0;
+const uint8_t DEFAULT_LIGHT_G = 0;
+const uint8_t DEFAULT_LIGHT_B = 0;
+const uint8_t DEFAULT_LIGHT_DELAY = 20;
+const uint8_t ACK_BRIGHTNESS = 40; // dim, so ack blinks don't blind you at close range
+
+// Current state - every write below applies immediately since there's no
+// animation cycle here to protect from a mid-cycle interruption.
+uint8_t light_state = 0;
+uint8_t light_r = DEFAULT_LIGHT_R;
+uint8_t light_g = DEFAULT_LIGHT_G;
+uint8_t light_b = DEFAULT_LIGHT_B;
+uint8_t light_delay = DEFAULT_LIGHT_DELAY;
+
+volatile bool deviceConnected = false;
+BLEServer* pServer = nullptr;
+
+void showCurrentState() {
+  if (light_state) {
+    leds[0] = CRGB(light_r, light_g, light_b);
+  } else {
+    leds[0] = CRGB::Black;
+  }
+  FastLED.show();
+}
+
+// Brief blink(s) to acknowledge a write that has no natural steady-state visual
+// of its own (delay/sync), then restores whatever was showing before.
+void blinkAck(uint8_t times) {
+  for (uint8_t i = 0; i < times; i++) {
+    leds[0] = CRGB(ACK_BRIGHTNESS, ACK_BRIGHTNESS, ACK_BRIGHTNESS);
+    FastLED.show();
+    delay(80);
+    leds[0] = CRGB::Black;
+    FastLED.show();
+    delay(80);
+  }
+  showCurrentState();
+}
+
+void resetToDefaults() {
+  light_state = 0;
+  light_r = DEFAULT_LIGHT_R;
+  light_g = DEFAULT_LIGHT_G;
+  light_b = DEFAULT_LIGHT_B;
+  light_delay = DEFAULT_LIGHT_DELAY;
+  showCurrentState();
+}
+
+class ServerCallbacks : public BLEServerCallbacks {
+  void onConnect(BLEServer* pServer) {
+    deviceConnected = true;
+    Serial.println("Device connected");
+  }
+
+  void onDisconnect(BLEServer* pServer) {
+    deviceConnected = false;
+    resetToDefaults();
+    Serial.println("Device disconnected, reset to defaults");
+  }
+};
+
+class LedStateCallback : public BLECharacteristicCallbacks {
+  void onWrite(BLECharacteristic* pCharacteristic) {
+    uint8_t* data = pCharacteristic->getData();
+    if (data && pCharacteristic->getLength() == 1) {
+      uint8_t value = data[0];
+      Serial.print("Received LED state: ");
+      Serial.println(value);
+      if (value != 0 && value != 1) {
+        Serial.println("Invalid LED state");
+        return;
+      }
+
+      light_state = value;
+      showCurrentState();
+    }
+  }
+};
+
+class LedColorCallback : public BLECharacteristicCallbacks {
+  void onWrite(BLECharacteristic* pCharacteristic) {
+    uint8_t* data = pCharacteristic->getData();
+    if (data && pCharacteristic->getLength() == 3) {
+      uint8_t r = data[0];
+      uint8_t g = data[1];
+      uint8_t b = data[2];
+      Serial.printf("Received LED color: R=%d, G=%d, B=%d\n", r, g, b);
+
+      light_r = r;
+      light_g = g;
+      light_b = b;
+      showCurrentState();
+    }
+  }
+};
+
+class LedDelayCallback : public BLECharacteristicCallbacks {
+  void onWrite(BLECharacteristic* pCharacteristic) {
+    uint8_t* data = pCharacteristic->getData();
+    if (data && pCharacteristic->getLength() == 1) {
+      uint8_t value = data[0];
+      Serial.print("Received LED delay: ");
+      Serial.println(value);
+      if (value < 5 || value > 75 || value % 5 != 0) {
+        Serial.println("Invalid LED delay");
+        return;
+      }
+
+      light_delay = value;
+      blinkAck(2); // two quick white blinks = "delay received"
+    }
+  }
+};
+
+class LedSyncCallback : public BLECharacteristicCallbacks {
+  void onWrite(BLECharacteristic* pCharacteristic) {
+    Serial.println("Received LED sync ping");
+    blinkAck(1); // one quick white blink = "sync ping received"
+  }
+};
+
+void setup() {
+  Serial.begin(115200);
+  Serial.println("Starting Light Bar BLE TEST RIG (built-in LED only)...");
+
+  FastLED.addLeds<NEOPIXEL, LED_PIN>(leds, LED_COUNT);
+  showCurrentState();
+
+  BLEDevice::init(DEVICE_NAME.c_str());
+  pServer = BLEDevice::createServer();
+  pServer->setCallbacks(new ServerCallbacks());
+
+  BLEService* pService = pServer->createService(LIGHTBAR_SERVICE_UUID);
+
+  BLECharacteristic* pLedStateChar = pService->createCharacteristic(
+    LED_STATE_CHARACTERISTIC_UUID, BLECharacteristic::PROPERTY_WRITE);
+  pLedStateChar->setCallbacks(new LedStateCallback());
+
+  BLECharacteristic* pLedColorChar = pService->createCharacteristic(
+    LED_COLOR_CHARACTERISTIC_UUID, BLECharacteristic::PROPERTY_WRITE);
+  pLedColorChar->setCallbacks(new LedColorCallback());
+
+  BLECharacteristic* pLedDelayChar = pService->createCharacteristic(
+    LED_DELAY_CHARACTERISTIC_UUID, BLECharacteristic::PROPERTY_WRITE);
+  pLedDelayChar->setCallbacks(new LedDelayCallback());
+
+  BLECharacteristic* pLedSyncChar = pService->createCharacteristic(
+    LED_SYNC_CHARACTERISTIC_UUID, BLECharacteristic::PROPERTY_WRITE | BLECharacteristic::PROPERTY_WRITE_NR);
+  pLedSyncChar->setCallbacks(new LedSyncCallback());
+
+  pService->start();
+
+  BLEAdvertising* pAdvertising = BLEDevice::getAdvertising();
+  pAdvertising->addServiceUUID(LIGHTBAR_SERVICE_UUID);
+  pAdvertising->setScanResponse(true);
+  pAdvertising->setMinPreferred(0x06);  // 7.5ms
+  pAdvertising->setMaxPreferred(0x12);  // 22.5ms
+  BLEDevice::startAdvertising();
+
+  Serial.println("BLE server started and advertising...");
+}
+
+void loop() {
+  while (!deviceConnected) {
+    delay(500);
+    pServer->startAdvertising();
+    Serial.println("Restarting advertising");
+  }
+}
