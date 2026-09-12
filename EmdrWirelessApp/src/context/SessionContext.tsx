@@ -11,14 +11,18 @@ import { DeviceRole } from '../ble/constants';
 import {
   intensityUserToFirmware,
   intensityFirmwareToUser,
-  perLedDelayMsToCycleMs,
-  cycleMsRangeFor,
+  fullDelayUserToMs,
+  fullDelayMsToUser,
+  motorDelayUserToMs,
   INTENSITY_USER_MIN,
   INTENSITY_USER_MAX,
+  FULL_DELAY_USER_MIN,
+  FULL_DELAY_USER_MAX,
+  MOTOR_DELAY_USER_MIN,
+  MOTOR_DELAY_USER_MAX,
   DEFAULT_LED_COUNT,
   LED_COUNT_MIN,
   LED_COUNT_MAX,
-  snapPulsatorDelayMs,
 } from '../utils/rangeMapping';
 
 export type RGBColor = { r: number; g: number; b: number };
@@ -31,8 +35,8 @@ interface SessionState {
   statuses: Partial<Record<DeviceRole, DeviceStatus>>;
   batteryLevels: Partial<Record<DeviceRole, number>>;
   intensityUser: number; // 1-16, see rangeMapping
-  cycleMs: number; // full round-trip sweep time, used when lightBarEnabled
-  pulsatorOnlyDelayMs: number; // used when pulsators run without the light bar
+  fullDelayUser: number; // 1-17 user level, used when lightBarEnabled - see rangeMapping
+  motorDelayUser: number; // 1-14 user level, used when pulsators run without the light bar
   color: RGBColor;
   ledCount: number; // app-side setting (Settings screen), persisted
   running: boolean;
@@ -48,8 +52,8 @@ interface SessionContextValue extends SessionState {
   disconnect: () => Promise<void>;
   toggleRunning: () => Promise<void>;
   setIntensityUser: (value: number) => void;
-  setCycleMs: (value: number) => void;
-  setPulsatorOnlyDelayMs: (value: number) => void;
+  setFullDelayUser: (value: number) => void;
+  setMotorDelayUser: (value: number) => void;
   setColor: (color: RGBColor) => void;
   setLedCount: (value: number) => void;
   clearLastError: () => void;
@@ -73,11 +77,12 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
     Math.round((INTENSITY_USER_MIN + INTENSITY_USER_MAX) / 2),
   );
   const [ledCount, setLedCountState] = useState(DEFAULT_LED_COUNT);
-  const [cycleMs, setCycleMsState] = useState(() => {
-    const { min, max } = cycleMsRangeFor(DEFAULT_LED_COUNT);
-    return Math.round((min + max) / 2 / 190) * 190;
-  });
-  const [pulsatorOnlyDelayMs, setPulsatorOnlyDelayMsState] = useState(500);
+  const [fullDelayUser, setFullDelayUserState] = useState(
+    Math.round((FULL_DELAY_USER_MIN + FULL_DELAY_USER_MAX) / 2),
+  );
+  const [motorDelayUser, setMotorDelayUserState] = useState(
+    Math.round((MOTOR_DELAY_USER_MIN + MOTOR_DELAY_USER_MAX) / 2),
+  );
   const [color, setColorState] = useState<RGBColor>(DEFAULT_COLOR);
   const [running, setRunning] = useState(false);
   const [connecting, setConnecting] = useState(false);
@@ -116,13 +121,13 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
     (role: DeviceRole, state: ParsedDeviceState, isInitialRead: boolean) => {
       if (!isInitialRead) return;
       if (role === 'lightBar' && 'lightState' in state) {
-        setCycleMsState(perLedDelayMsToCycleMs(state.delay, ledCount));
+        setFullDelayUserState(fullDelayMsToUser(state.delay));
         setColorState({ r: state.r, g: state.g, b: state.b });
       } else if (role === 'pulsator1' && 'motorState' in state) {
         setIntensityUserState(intensityFirmwareToUser(state.motorIntensity));
       }
     },
-    [ledCount],
+    [],
   );
 
   const onBatteryUpdate = useCallback((role: DeviceRole, percent: number) => {
@@ -176,12 +181,12 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
     () => ({
       pulsatorsEnabled,
       lightBarEnabled,
-      cycleMs,
-      pulsatorOnlyDelayMs,
+      fullDelayMs: fullDelayUserToMs(fullDelayUser),
+      pulsatorOnlyDelayMs: motorDelayUserToMs(motorDelayUser),
       color,
       ledCount,
     }),
-    [pulsatorsEnabled, lightBarEnabled, cycleMs, pulsatorOnlyDelayMs, color, ledCount],
+    [pulsatorsEnabled, lightBarEnabled, fullDelayUser, motorDelayUser, color, ledCount],
   );
 
   // Always flips `running` and reports whatever failed - never gets stuck showing
@@ -209,23 +214,24 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
     [running, reportEngineErrors],
   );
 
-  const setCycleMs = useCallback(
+  const setFullDelayUser = useCallback(
     (value: number) => {
-      setCycleMsState(value);
+      setFullDelayUserState(value);
       if (running) {
-        stimulationEngine.updateTiming({ ...buildConfig(), cycleMs: value }).then(reportEngineErrors);
+        stimulationEngine
+          .updateTiming({ ...buildConfig(), fullDelayMs: fullDelayUserToMs(value) })
+          .then(reportEngineErrors);
       }
     },
     [running, buildConfig, reportEngineErrors],
   );
 
-  const setPulsatorOnlyDelayMs = useCallback(
+  const setMotorDelayUser = useCallback(
     (value: number) => {
-      const snapped = snapPulsatorDelayMs(value);
-      setPulsatorOnlyDelayMsState(snapped);
+      setMotorDelayUserState(value);
       if (running) {
         stimulationEngine
-          .updateTiming({ ...buildConfig(), pulsatorOnlyDelayMs: snapped })
+          .updateTiming({ ...buildConfig(), pulsatorOnlyDelayMs: motorDelayUserToMs(value) })
           .then(reportEngineErrors);
       }
     },
@@ -255,8 +261,8 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
     statuses,
     batteryLevels,
     intensityUser,
-    cycleMs,
-    pulsatorOnlyDelayMs,
+    fullDelayUser,
+    motorDelayUser,
     color,
     ledCount,
     running,
@@ -269,8 +275,8 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
     disconnect,
     toggleRunning,
     setIntensityUser,
-    setCycleMs,
-    setPulsatorOnlyDelayMs,
+    setFullDelayUser,
+    setMotorDelayUser,
     setColor,
     setLedCount,
     clearLastError,

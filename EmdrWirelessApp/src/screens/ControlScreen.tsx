@@ -1,8 +1,8 @@
 import React, { useMemo } from 'react';
 import { View, Text, Pressable, StyleSheet, ScrollView } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import Slider from '@react-native-community/slider';
 import ColorPicker from 'react-native-wheel-color-picker';
+import StepSlider from '../components/StepSlider';
 import { useNavigation } from '@react-navigation/native';
 import type { NativeStackNavigationProp } from '@react-navigation/native-stack';
 import type { RootStackParamList } from '../navigation/types';
@@ -12,10 +12,10 @@ import { rgbToHex, hexToRgb } from '../utils/color';
 import {
   INTENSITY_USER_MIN,
   INTENSITY_USER_MAX,
-  cycleMsRangeFor,
-  PULSATOR_DELAY_MIN_MS,
-  PULSATOR_DELAY_MAX_MS,
-  msToSecondsLabel,
+  FULL_DELAY_USER_MIN,
+  FULL_DELAY_USER_MAX,
+  MOTOR_DELAY_USER_MIN,
+  MOTOR_DELAY_USER_MAX,
 } from '../utils/rangeMapping';
 
 type Nav = NativeStackNavigationProp<RootStackParamList, 'Control'>;
@@ -28,13 +28,12 @@ export default function ControlScreen() {
     statuses,
     intensityUser,
     setIntensityUser,
-    cycleMs,
-    setCycleMs,
-    pulsatorOnlyDelayMs,
-    setPulsatorOnlyDelayMs,
+    fullDelayUser,
+    setFullDelayUser,
+    motorDelayUser,
+    setMotorDelayUser,
     color,
     setColor,
-    ledCount,
     running,
     toggleRunning,
     disconnect,
@@ -48,12 +47,11 @@ export default function ControlScreen() {
   );
   const activeCount = (pulsatorsEnabled ? 2 : 0) + (lightBarEnabled ? 1 : 0);
 
-  const lightBarCycleRange = useMemo(() => cycleMsRangeFor(ledCount), [ledCount]);
-  const timingMs = lightBarEnabled ? cycleMs : pulsatorOnlyDelayMs;
-  const timingMin = lightBarEnabled ? lightBarCycleRange.min : PULSATOR_DELAY_MIN_MS;
-  const timingMax = lightBarEnabled ? lightBarCycleRange.max : PULSATOR_DELAY_MAX_MS;
-  const timingLabel = lightBarEnabled ? 'Cycle Time' : 'Pulsator Delay';
-  const onTimingChange = lightBarEnabled ? setCycleMs : setPulsatorOnlyDelayMs;
+  const timingValue = lightBarEnabled ? fullDelayUser : motorDelayUser;
+  const timingMin = lightBarEnabled ? FULL_DELAY_USER_MIN : MOTOR_DELAY_USER_MIN;
+  const timingMax = lightBarEnabled ? FULL_DELAY_USER_MAX : MOTOR_DELAY_USER_MAX;
+  const timingLabel = lightBarEnabled ? 'Full Delay' : 'Motor Delay';
+  const onTimingChange = lightBarEnabled ? setFullDelayUser : setMotorDelayUser;
 
   const onDisconnect = async () => {
     // Best-effort: disconnect() itself never throws, but this still guarantees
@@ -103,20 +101,12 @@ export default function ControlScreen() {
               <Text style={styles.cardTitle}>Pulsator Intensity</Text>
               <Text style={styles.cardValue}>{intensityUser}</Text>
             </View>
-            <Slider
-              minimumValue={INTENSITY_USER_MIN}
-              maximumValue={INTENSITY_USER_MAX}
-              step={1}
+            <StepSlider
+              min={INTENSITY_USER_MIN}
+              max={INTENSITY_USER_MAX}
               value={intensityUser}
-              onValueChange={setIntensityUser}
-              minimumTrackTintColor={colors.primary}
-              maximumTrackTintColor={colors.border}
-              thumbTintColor={colors.primary}
+              onChange={setIntensityUser}
             />
-            <View style={styles.rangeRow}>
-              <Text style={styles.rangeLabel}>{INTENSITY_USER_MIN}</Text>
-              <Text style={styles.rangeLabel}>{INTENSITY_USER_MAX}</Text>
-            </View>
           </View>
         )}
 
@@ -124,22 +114,14 @@ export default function ControlScreen() {
           <View style={styles.card}>
             <View style={styles.cardHeader}>
               <Text style={styles.cardTitle}>{timingLabel}</Text>
-              <Text style={styles.cardValue}>{msToSecondsLabel(timingMs)}</Text>
+              <Text style={styles.cardValue}>{timingValue}</Text>
             </View>
-            <Slider
-              minimumValue={timingMin / 1000}
-              maximumValue={timingMax / 1000}
-              step={0.01}
-              value={timingMs / 1000}
-              onValueChange={seconds => onTimingChange(Math.round(seconds * 1000))}
-              minimumTrackTintColor={colors.primary}
-              maximumTrackTintColor={colors.border}
-              thumbTintColor={colors.primary}
+            <StepSlider
+              min={timingMin}
+              max={timingMax}
+              value={timingValue}
+              onChange={onTimingChange}
             />
-            <View style={styles.rangeRow}>
-              <Text style={styles.rangeLabel}>{msToSecondsLabel(timingMin)}</Text>
-              <Text style={styles.rangeLabel}>{msToSecondsLabel(timingMax)}</Text>
-            </View>
           </View>
         )}
 
@@ -229,8 +211,6 @@ const styles = StyleSheet.create({
   cardHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'baseline' },
   cardTitle: { fontSize: 14, fontWeight: '600', color: colors.text },
   cardValue: { fontSize: 14, fontWeight: '600', color: colors.primary },
-  rangeRow: { flexDirection: 'row', justifyContent: 'space-between', marginTop: 2 },
-  rangeLabel: { fontSize: 11, color: colors.textMuted },
   flexSpacer: { minHeight: 12, flexGrow: 1 },
   actions: { gap: 10 },
   button: {

@@ -81,7 +81,7 @@ byte layout below changes.
 |---|---|---|---|---|
 | LED state | `2cac943b-668b-4de0-8091-332dedc91739` | 2 | `[version, state 0/1]` | Turning off applies instantly even mid-sweep. |
 | LED color | `526f1035-4262-4175-8ad0-16387b946fce` | 4 | `[version, R, G, B]` | Raw bytes, not a string. |
-| LED delay | `ee231dc3-9f67-4254-a52a-e41b59f50502` | 2 | `[version, delay 5-75, multiple of 5]` | Per-LED step delay (ms) - **not** a full cycle time, see below. |
+| LED delay | `ee231dc3-9f67-4254-a52a-e41b59f50502` | 2 | `[version, delay 20-100, multiple of 5]` | Per-LED step delay (ms), a.k.a. "Full Delay" app-side - sent directly, no conversion, see below. |
 | LED sync | `822ff8ad-58e1-44f8-8cb5-f4048a0ee3c3` | 1 | `[version]` | Write-without-response trigger, see "Sync model" below. |
 | Device state | see `constants.ts` | 6 | `[version, light_state, r, g, b, delay]` | **Read + Notify.** Same resync purpose as the Pulsators' one. |
 
@@ -121,15 +121,21 @@ reference, with Pulsators and Headphone optionally "in sync" with it
 sync" toggles, on by default). We adopted the same shape:
 
 - **The Light Bar free-runs its own local sweep animation** off its own
-  `millis()`, using whatever `light_delay` (per-LED ms) it was last told.
-  This is the one thing the patient directly watches, so it needs to be
-  smooth and self-contained - no dependency on live BLE traffic per frame.
+  `millis()`, using whatever `light_delay` (per-LED ms, "Full Delay" in the
+  app) it was last told. This is the one thing the patient directly watches,
+  so it needs to be smooth and self-contained - no dependency on live BLE
+  traffic per frame. The two end LEDs (where the sweep reverses direction)
+  deliberately dwell for **2x** `light_delay` instead of 1x (`dwellMsFor()`
+  in `Light Bar/main/main.ino`) - see the next bullet for why.
 - **The pulsators have no local timer at all.** Every on/off transition is a
   live, immediate BLE write from the app (`EmdrWirelessApp/src/ble/StimulationEngine.ts`).
-  The app computes when the Light Bar's sweep crosses the middle (twice per
-  full cycle, a quarter and three-quarters of the way through, since a round
-  trip is two LED-count sweeps) purely from the same parameters it gave the
-  Light Bar - it doesn't need the Light Bar to report anything back.
+  With the Light Bar enabled, each pulsator switches exactly when the sweep
+  reaches an end and reverses - i.e. one pulsator is on for a full one-way
+  pass, then the other for the return pass. The app computes that pass
+  duration as `fullDelayMs * ledCount`, which only lines up with the Light
+  Bar's real timing *because* of the end-LED dwell-doubling above: a one-way
+  pass without it would take `fullDelayMs * (LED_COUNT - 1)`, not
+  `* LED_COUNT`, and the two would slowly drift apart over a session.
 - **Why not let pulsators free-run too?** Two independent ESP32 boards
   free-running off their own crystals will always drift apart from each
   other over a session (tens of ms per minute) with no way to correct it
@@ -147,10 +153,9 @@ sync" toggles, on by default). We adopted the same shape:
   perceive a skipped or stretched step.
 - **Pulsators-only sessions** (Light Bar disabled) work the same way, just
   without a Light Bar to derive timing from - the app runs its own interval
-  timer directly, alternating the two pulsators. See `pulsatorOnlyDelayMs` /
-  `PULSATOR_DELAY_MIN_MS`/`MAX_MS` in `rangeMapping.ts` (100-1500ms,
-  carried over from what used to be a firmware-validated range before the
-  pulsators became purely reactive).
+  timer directly, alternating the two pulsators on "Motor Delay"
+  (`MOTOR_DELAY_FIRMWARE_MIN`/`MAX` in `rangeMapping.ts`, 200-1500ms,
+  app-side only, carried over from the original wired-kit design).
 
 **What this means for firmware changes**: if you're tempted to add a local
 timer back to the pulsators, first re-read this section - it was deliberately
@@ -164,11 +169,16 @@ The app never exposes firmware's raw ranges directly - `EmdrWirelessApp/src/util
 is the single source of truth for both directions, and screens never talk to
 firmware units directly.
 
+Every slider is a `StepSlider` (`EmdrWirelessApp/src/components/StepSlider.tsx`) -
+a discrete "digital" control that only ever rests on a fixed dot, shown to the
+user as a plain level number rather than a raw unit value (same treatment
+Pulsator Intensity already had).
+
 | Control | Shown to user | Sent to firmware |
 |---|---|---|
 | Pulsator intensity | 1-16 (step 1) | 40-200, linear map |
-| Cycle time (Light Bar enabled) | 0.19s-2.85s | per-LED delay 5-75ms, snapped to a multiple of 5 (cycle = 2×(LED_COUNT-1)×perLedDelay, i.e. a full sweep out and back) |
-| Pulsator delay (pulsators only) | 0.1s-1.5s | same value in ms, snapped to a multiple of 5 |
+| Full delay (Light Bar enabled) | 1-17 (step 1) | per-LED delay 20-100ms (step 5ms) - sent directly |
+| Motor delay (pulsators only) | 1-14 (step 1) | 200-1500ms (step 100ms), app-side only |
 
 ## Mobile app (`EmdrWirelessApp/`)
 

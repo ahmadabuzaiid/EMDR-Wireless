@@ -220,7 +220,7 @@ class LedDelayCallback : public BLECharacteristicCallbacks {
       uint8_t value = data[1];
       Serial.print("Received LED delay: ");
       Serial.println(value);
-      if (value < 5 || value > 75 || value % 5 != 0) {
+      if (value < 20 || value > 100 || value % 5 != 0) {
         Serial.println("Invalid LED delay");
         return;
       }

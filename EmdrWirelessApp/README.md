@@ -43,18 +43,42 @@ light bar over Bluetooth Low Energy, gated by a one-time activation code.
 
 ## Slider ranges (user-facing vs. what's actually sent over BLE)
 
+Every slider in the app is a `StepSlider` (`src/components/StepSlider.tsx`) - a
+discrete, "digital" control, not an analog one. It only ever rests on one of a
+fixed set of dots (no in-between/decimal values while dragging), and is shown to
+the user as a plain level number (1, 2, 3, ...) rather than a raw unit value -
+same treatment for all three: Pulsator Intensity, and whichever of Full Delay /
+Motor Delay applies.
+
 | Control | Shown to user | Sent to firmware |
 |---|---|---|
 | Pulsator Intensity | 1-16 (step 1) | 40-200 (linear map, `rangeMapping.ts`) |
-| Cycle Time (Light Bar enabled) | 0.19s-2.85s at the default 20-LED count | per-LED delay 5-75ms, snapped to a multiple of 5 |
-| Pulsator Delay (pulsators only) | 0.1s-1.5s | same value, snapped to a multiple of 5ms |
+| Full Delay (Light Bar enabled) | 1-17 (step 1) | per-LED delay 20-100ms (step 5ms) - sent directly, no conversion |
+| Motor Delay (pulsators only, no Light Bar) | 1-14 (step 1) | 200-1500ms (step 100ms), app-side only timing |
 
 All of this lives in `src/utils/rangeMapping.ts` - screens never talk to firmware
-ranges directly. The Cycle Time range depends on the **LED count setting**
-(Control screen -> gear icon -> Settings), since a longer strip takes longer to
-sweep at the same per-LED delay - this is an app-side setting only, since firmware
-can't report its own compiled-in `LED_COUNT` back; keep the setting in sync with
-whatever the physical strip actually is.
+ranges directly.
+
+**Full Delay vs. Motor Delay** - which one applies depends on whether the Light
+Bar is enabled for the session, mirroring the original wired-kit design:
+
+- **Light Bar enabled** (with or without pulsators): **Full Delay** is used - the
+  duration a single LED stays lit before the sweep advances one step. Sent
+  straight to the Light Bar's `LED_DELAY` characteristic. If pulsators are also
+  enabled, each pulsator's on/off phase is timed to a full one-way sweep pass -
+  `fullDelayMs * ledCount` - so a pulsator switches exactly when the Light Bar
+  reaches an end and reverses direction (see `StimulationEngine.ts`). This needs
+  the **LED count setting** (Control screen -> gear icon -> Settings) to be
+  accurate, since firmware can't report its own compiled-in `LED_COUNT` back.
+- **Light Bar disabled** (pulsators only): **Motor Delay** is used directly as
+  the pulsator alternation period - no Light Bar to key off of.
+
+The `fullDelayMs * ledCount` formula only lines up with the Light Bar's actual
+sweep timing because the firmware deliberately dwells 2x as long on the two end
+LEDs (where the sweep reverses) - see the comment on `dwellMsFor()` in
+`Light Bar/main/main.ino`. Without that doubling, a real one-way pass would only
+take `fullDelayMs * (LED_COUNT - 1)`, which would slowly drift out of sync with
+the pulsators over a session.
 
 ## Settings
 

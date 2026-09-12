@@ -1,10 +1,9 @@
 import { bleService } from './index';
-import { cycleMsToPerLedDelayMs } from '../utils/rangeMapping';
 
 export interface SessionConfig {
   pulsatorsEnabled: boolean;
   lightBarEnabled: boolean;
-  cycleMs: number; // full round-trip sweep time - only meaningful when lightBarEnabled
+  fullDelayMs: number; // per-LED step delay sent straight to the Light Bar - only meaningful when lightBarEnabled
   pulsatorOnlyDelayMs: number; // only meaningful when pulsators run without the light bar
   color: { r: number; g: number; b: number };
   ledCount: number; // app-side setting (Settings screen) - must match the physical strip
@@ -32,6 +31,17 @@ class StimulationEngine {
   private activeSide: 1 | 2 = 1;
   private running = false;
 
+  // Bumped by every start()/stop() call, and checked after each await inside
+  // start(). start() does several awaited BLE writes before it creates its
+  // timers - if a second start() (or a stop()) begins while an earlier one is
+  // still mid-flight, without this guard both calls would eventually create
+  // their own resyncTimer/alternateTimer, and the second assignment would
+  // silently overwrite the first *without clearing it* - leaking a timer that
+  // stop()'s clearTimers() can no longer reach (it only ever sees whichever
+  // one is currently assigned). A superseded call now bails out as soon as it
+  // notices, before it can create anything or apply stale values.
+  private generation = 0;
+
   isRunning(): boolean {
     return this.running;
   }
@@ -39,15 +49,17 @@ class StimulationEngine {
   async start(config: SessionConfig): Promise<string[]> {
     this.clearTimers();
     this.running = true;
+    const myGeneration = ++this.generation;
     const errors: string[] = [];
+    const superseded = () => this.generation !== myGeneration;
 
     if (config.lightBarEnabled) {
-      const perLedDelayMs = cycleMsToPerLedDelayMs(config.cycleMs, config.ledCount);
-      await this.safe(errors, 'set light delay', () => bleService.writeLedDelay(perLedDelayMs));
+      await this.safe(errors, 'set light delay', () => bleService.writeLedDelay(config.fullDelayMs));
       await this.safe(errors, 'set light color', () =>
         bleService.writeLedColor(config.color.r, config.color.g, config.color.b),
       );
       await this.safe(errors, 'turn light on', () => bleService.writeLedState(true));
+      if (superseded()) return errors;
 
       this.resyncTimer = setInterval(() => {
         bleService.pingLedSync().catch(err => console.warn('[StimulationEngine] LED sync ping failed:', err));
@@ -55,14 +67,21 @@ class StimulationEngine {
     }
 
     if (config.pulsatorsEnabled) {
-      // Mid-crossing happens twice per round trip (once each direction), each
-      // a quarter of the way into the cycle - see project notes on the sync model.
+      // With the Light Bar enabled, each pulsator should switch exactly when the
+      // sweep reverses direction at either end - i.e. one pulsator on for a full
+      // one-way pass, then the other for the return pass. The firmware dwells
+      // 2x as long on the two end LEDs specifically so this works out exactly:
+      // one-way pass time = fullDelayMs * ledCount (see Light Bar/main/main.ino's
+      // update_led_animation()). Without the Light Bar, there's no sweep to key
+      // off of, so just alternate on the standalone Motor Delay instead.
       const alternationPeriodMs = config.lightBarEnabled
-        ? config.cycleMs / 4
+        ? config.fullDelayMs * config.ledCount
         : config.pulsatorOnlyDelayMs;
 
       this.activeSide = 1;
       await this.safe(errors, 'start pulsator alternation', () => this.fireAlternation());
+      if (superseded()) return errors;
+
       this.alternateTimer = setInterval(() => {
         this.fireAlternation().catch(err =>
           console.warn('[StimulationEngine] pulsator alternation write failed:', err),
@@ -76,6 +95,7 @@ class StimulationEngine {
   async stop(): Promise<string[]> {
     this.clearTimers();
     this.running = false;
+    this.generation++;
     const errors: string[] = [];
     await this.safe(errors, 'stop pulsator 1', () => bleService.writeMotorState('pulsator1', false));
     await this.safe(errors, 'stop pulsator 2', () => bleService.writeMotorState('pulsator2', false));

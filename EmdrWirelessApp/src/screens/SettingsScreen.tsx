@@ -54,9 +54,10 @@ export default function SettingsScreen() {
         <View style={styles.card}>
           <Text style={styles.cardTitle}>LED Count</Text>
           <Text style={styles.cardSubtitle}>
-            Must match the physical strip length wired to the Light Bar. Used only to
-            convert the Cycle Time slider into a per-LED delay - the firmware doesn't
-            report its own count back, so this has to be kept in sync manually.
+            Must match the physical strip length wired to the Light Bar. Used to convert
+            Full Delay into the pulsator on/off timing when the Light Bar is enabled -
+            the firmware doesn't report its own count back, so this has to be kept in
+            sync manually.
           </Text>
           <View style={styles.stepperRow}>
             <Pressable

@@ -244,7 +244,7 @@ class LedDelayCallback : public BLECharacteristicCallbacks {
       uint8_t value = data[1];
       Serial.print("Received LED delay: ");
       Serial.println(value);
-      if (value < 5 || value > 75 || value % 5 != 0) {
+      if (value < 20 || value > 100 || value % 5 != 0) {
         Serial.println("Invalid LED delay");
         return;
       }
@@ -257,12 +257,23 @@ class LedDelayCallback : public BLECharacteristicCallbacks {
   }
 };
 
+// The two end LEDs (where the sweep reverses direction) dwell for 2x light_delay
+// instead of 1x. This isn't cosmetic - the app times each pulsator's on/off phase
+// to a full one-way pass, computed as light_delay * LED_COUNT (see StimulationEngine.ts).
+// Without this doubling, a real one-way pass only takes light_delay * (LED_COUNT-1),
+// which would drift out of sync with the pulsators over a session. Doubling both
+// ends makes the two formulas agree exactly - see project notes on the sync model.
+unsigned long dwellMsFor(int ledIndex) {
+  bool atEnd = (ledIndex == 0) || (ledIndex == LED_COUNT - 1);
+  return (unsigned long)light_delay * (atEnd ? 2 : 1);
+}
+
 // Non-blocking LED animation update
 void update_led_animation() {
   unsigned long current_time = millis();
 
   // Only update if enough time has passed
-  if (current_time - last_led_update >= light_delay) {
+  if (current_time - last_led_update >= dwellMsFor(current_led)) {
     last_led_update = current_time;
     animation_active = true;
 

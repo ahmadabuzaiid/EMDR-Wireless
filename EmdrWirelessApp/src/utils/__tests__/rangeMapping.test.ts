@@ -5,16 +5,18 @@ import {
   INTENSITY_FIRMWARE_MAX,
   INTENSITY_USER_MIN,
   INTENSITY_USER_MAX,
-  DEFAULT_LED_COUNT,
-  PER_LED_DELAY_MIN_MS,
-  PER_LED_DELAY_MAX_MS,
-  cycleMsRangeFor,
-  cycleMsToPerLedDelayMs,
-  perLedDelayMsToCycleMs,
-  PULSATOR_DELAY_MIN_MS,
-  PULSATOR_DELAY_MAX_MS,
-  snapPulsatorDelayMs,
-  msToSecondsLabel,
+  fullDelayUserToMs,
+  fullDelayMsToUser,
+  FULL_DELAY_FIRMWARE_MIN,
+  FULL_DELAY_FIRMWARE_MAX,
+  FULL_DELAY_USER_MIN,
+  FULL_DELAY_USER_MAX,
+  motorDelayUserToMs,
+  motorDelayMsToUser,
+  MOTOR_DELAY_FIRMWARE_MIN,
+  MOTOR_DELAY_FIRMWARE_MAX,
+  MOTOR_DELAY_USER_MIN,
+  MOTOR_DELAY_USER_MAX,
   clamp,
 } from '../rangeMapping';
 
@@ -57,62 +59,76 @@ describe('pulsator intensity mapping', () => {
   });
 });
 
-describe('light bar cycle time <-> per-LED delay', () => {
-  test('cycleMsRangeFor matches the documented 190ms-2850ms range at the default LED count', () => {
-    const { min, max } = cycleMsRangeFor(DEFAULT_LED_COUNT);
-    expect(min).toBe(190);
-    expect(max).toBe(2850);
+describe('full delay (Light Bar enabled)', () => {
+  test('user range is 1-17 at the firmware-validated 20-100ms step-5 range', () => {
+    expect(FULL_DELAY_USER_MIN).toBe(1);
+    expect(FULL_DELAY_USER_MAX).toBe(17);
   });
 
-  test('the range grows with LED count, since more LEDs means a longer sweep at the same per-LED delay', () => {
-    const small = cycleMsRangeFor(10);
-    const large = cycleMsRangeFor(40);
-    expect(large.max).toBeGreaterThan(small.max);
+  test('maps the user range endpoints onto the exact firmware range endpoints', () => {
+    expect(fullDelayUserToMs(FULL_DELAY_USER_MIN)).toBe(FULL_DELAY_FIRMWARE_MIN);
+    expect(fullDelayUserToMs(FULL_DELAY_USER_MAX)).toBe(FULL_DELAY_FIRMWARE_MAX);
   });
 
-  test('converting the range endpoints back gives exactly the firmware delay endpoints', () => {
-    const { min, max } = cycleMsRangeFor(DEFAULT_LED_COUNT);
-    expect(cycleMsToPerLedDelayMs(min, DEFAULT_LED_COUNT)).toBe(PER_LED_DELAY_MIN_MS);
-    expect(cycleMsToPerLedDelayMs(max, DEFAULT_LED_COUNT)).toBe(PER_LED_DELAY_MAX_MS);
+  test('maps the firmware range endpoints back onto the exact user range endpoints', () => {
+    expect(fullDelayMsToUser(FULL_DELAY_FIRMWARE_MIN)).toBe(FULL_DELAY_USER_MIN);
+    expect(fullDelayMsToUser(FULL_DELAY_FIRMWARE_MAX)).toBe(FULL_DELAY_USER_MAX);
   });
 
-  test('always snaps to a multiple of 5, since the firmware rejects anything else', () => {
-    for (let cycleMs = 190; cycleMs <= 2850; cycleMs += 37) {
-      const perLed = cycleMsToPerLedDelayMs(cycleMs, DEFAULT_LED_COUNT);
-      expect(perLed % 5).toBe(0);
+  test('every level produces a firmware-valid multiple of 5 inside 20-100ms', () => {
+    for (let level = FULL_DELAY_USER_MIN; level <= FULL_DELAY_USER_MAX; level++) {
+      const ms = fullDelayUserToMs(level);
+      expect(ms % 5).toBe(0);
+      expect(ms).toBeGreaterThanOrEqual(FULL_DELAY_FIRMWARE_MIN);
+      expect(ms).toBeLessThanOrEqual(FULL_DELAY_FIRMWARE_MAX);
     }
   });
 
-  test('never produces a per-LED delay outside the validated 5-75ms range', () => {
-    // deliberately out-of-range cycle values, to exercise the clamp
-    expect(cycleMsToPerLedDelayMs(0, DEFAULT_LED_COUNT)).toBe(PER_LED_DELAY_MIN_MS);
-    expect(cycleMsToPerLedDelayMs(999999, DEFAULT_LED_COUNT)).toBe(PER_LED_DELAY_MAX_MS);
-  });
-
-  test('perLedDelayMsToCycleMs and cycleMsToPerLedDelayMs are inverses at valid 5ms steps', () => {
-    for (let perLed = PER_LED_DELAY_MIN_MS; perLed <= PER_LED_DELAY_MAX_MS; perLed += 5) {
-      const cycleMs = perLedDelayMsToCycleMs(perLed, DEFAULT_LED_COUNT);
-      expect(cycleMsToPerLedDelayMs(cycleMs, DEFAULT_LED_COUNT)).toBe(perLed);
+  test('user level and ms value are inverses at every step', () => {
+    for (let level = FULL_DELAY_USER_MIN; level <= FULL_DELAY_USER_MAX; level++) {
+      expect(fullDelayMsToUser(fullDelayUserToMs(level))).toBe(level);
     }
   });
-});
 
-describe('pulsator-only delay', () => {
-  test('snaps to the nearest multiple of 5', () => {
-    expect(snapPulsatorDelayMs(503)).toBe(505);
-    expect(snapPulsatorDelayMs(500)).toBe(500);
-  });
-
-  test('clamps to the 100-1500ms range', () => {
-    expect(snapPulsatorDelayMs(0)).toBe(PULSATOR_DELAY_MIN_MS);
-    expect(snapPulsatorDelayMs(999999)).toBe(PULSATOR_DELAY_MAX_MS);
+  test('clamps out-of-range levels', () => {
+    expect(fullDelayUserToMs(0)).toBe(FULL_DELAY_FIRMWARE_MIN);
+    expect(fullDelayUserToMs(999)).toBe(FULL_DELAY_FIRMWARE_MAX);
   });
 });
 
-describe('msToSecondsLabel', () => {
-  test('formats milliseconds as seconds with 2 decimal places', () => {
-    expect(msToSecondsLabel(190)).toBe('0.19 s');
-    expect(msToSecondsLabel(2850)).toBe('2.85 s');
-    expect(msToSecondsLabel(1000)).toBe('1.00 s');
+describe('motor delay (pulsators only, no Light Bar)', () => {
+  test('user range is 1-14 at the 200-1500ms step-100 range', () => {
+    expect(MOTOR_DELAY_USER_MIN).toBe(1);
+    expect(MOTOR_DELAY_USER_MAX).toBe(14);
+  });
+
+  test('maps the user range endpoints onto the exact ms range endpoints', () => {
+    expect(motorDelayUserToMs(MOTOR_DELAY_USER_MIN)).toBe(MOTOR_DELAY_FIRMWARE_MIN);
+    expect(motorDelayUserToMs(MOTOR_DELAY_USER_MAX)).toBe(MOTOR_DELAY_FIRMWARE_MAX);
+  });
+
+  test('maps the ms range endpoints back onto the exact user range endpoints', () => {
+    expect(motorDelayMsToUser(MOTOR_DELAY_FIRMWARE_MIN)).toBe(MOTOR_DELAY_USER_MIN);
+    expect(motorDelayMsToUser(MOTOR_DELAY_FIRMWARE_MAX)).toBe(MOTOR_DELAY_USER_MAX);
+  });
+
+  test('every level produces a multiple of 100ms inside 200-1500ms', () => {
+    for (let level = MOTOR_DELAY_USER_MIN; level <= MOTOR_DELAY_USER_MAX; level++) {
+      const ms = motorDelayUserToMs(level);
+      expect(ms % 100).toBe(0);
+      expect(ms).toBeGreaterThanOrEqual(MOTOR_DELAY_FIRMWARE_MIN);
+      expect(ms).toBeLessThanOrEqual(MOTOR_DELAY_FIRMWARE_MAX);
+    }
+  });
+
+  test('user level and ms value are inverses at every step', () => {
+    for (let level = MOTOR_DELAY_USER_MIN; level <= MOTOR_DELAY_USER_MAX; level++) {
+      expect(motorDelayMsToUser(motorDelayUserToMs(level))).toBe(level);
+    }
+  });
+
+  test('clamps out-of-range levels', () => {
+    expect(motorDelayUserToMs(0)).toBe(MOTOR_DELAY_FIRMWARE_MIN);
+    expect(motorDelayUserToMs(999)).toBe(MOTOR_DELAY_FIRMWARE_MAX);
   });
 });
