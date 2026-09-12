@@ -34,6 +34,7 @@ export default function DeviceSelectScreen() {
     togglePulsators,
     toggleLightBar,
     statuses,
+    batteryLevels,
     connecting,
     connect,
     allConnected,
@@ -119,6 +120,9 @@ export default function DeviceSelectScreen() {
                 <View key={role} style={styles.statusRow}>
                   <View style={[styles.statusDot, { backgroundColor: statusColor(statuses[role]) }]} />
                   <Text style={styles.statusRoleLabel}>{DEVICE_ROLE_NAMES[role]}</Text>
+                  {batteryLevels[role] !== undefined && (
+                    <Text style={styles.batteryText}>{batteryLevels[role]}%</Text>
+                  )}
                   <Text style={[styles.statusText, { color: statusColor(statuses[role]) }]}>
                     {statuses[role] ? STATUS_LABEL[statuses[role] as DeviceStatus] : ''}
                   </Text>
@@ -192,6 +196,7 @@ const styles = StyleSheet.create({
   },
   statusDot: { width: 8, height: 8, borderRadius: 4 },
   statusRoleLabel: { flex: 1, fontSize: 14, fontWeight: '500', color: colors.text },
+  batteryText: { fontSize: 12, color: colors.textMuted, marginRight: 4 },
   statusText: { fontSize: 13, fontWeight: '600' },
   flexSpacer: { minHeight: 24, flexGrow: 1 },
   button: {

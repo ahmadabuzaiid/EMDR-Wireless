@@ -3,4 +3,5 @@ export type RootStackParamList = {
   Otp: undefined;
   DeviceSelect: undefined;
   Control: undefined;
+  Settings: undefined;
 };

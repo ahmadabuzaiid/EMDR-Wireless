@@ -29,26 +29,38 @@ export function intensityFirmwareToUser(firmwareValue: number): number {
 // The app drives the Light Bar's LED_DELAY characteristic (single-LED step delay,
 // firmware-validated 5-75ms, multiples of 5 only - Light Bar/main/main.ino).
 // The user instead dials in the full round-trip sweep time (LED crosses right,
-// then back left): cycle = 2 * (LED_COUNT - 1) * perLedDelay.
-export const LED_COUNT = 20;
-const CYCLE_STEPS = 2 * (LED_COUNT - 1); // 38 - one full sweep out and back
+// then back left): cycle = 2 * (ledCount - 1) * perLedDelay.
+//
+// ledCount is a runtime app SETTING (Settings screen, persisted), not a firmware
+// constant - firmware's own LED_COUNT is a compile-time array size it can't report
+// back, so this only works correctly if the setting matches the physical strip
+// length. DEFAULT_LED_COUNT matches the real Light Bar's current firmware default.
+export const DEFAULT_LED_COUNT = 20;
+export const LED_COUNT_MIN = 2;
+export const LED_COUNT_MAX = 120;
 export const PER_LED_DELAY_MIN_MS = 5;
 export const PER_LED_DELAY_MAX_MS = 75;
 export const PER_LED_DELAY_STEP_MS = 5;
 
-export const CYCLE_MS_MIN = CYCLE_STEPS * PER_LED_DELAY_MIN_MS; // 190
-export const CYCLE_MS_MAX = CYCLE_STEPS * PER_LED_DELAY_MAX_MS; // 2850
+function cycleStepsFor(ledCount: number): number {
+  return 2 * (ledCount - 1); // one full sweep out and back
+}
+
+export function cycleMsRangeFor(ledCount: number): { min: number; max: number } {
+  const steps = cycleStepsFor(ledCount);
+  return { min: steps * PER_LED_DELAY_MIN_MS, max: steps * PER_LED_DELAY_MAX_MS };
+}
 
 // Slider itself works in whole seconds-with-decimals for a smooth drag feel;
 // the firmware only accepts 5ms-multiple per-LED delays, so snap at apply time.
-export function cycleMsToPerLedDelayMs(cycleMs: number): number {
-  const rawPerLed = cycleMs / CYCLE_STEPS;
+export function cycleMsToPerLedDelayMs(cycleMs: number, ledCount: number): number {
+  const rawPerLed = cycleMs / cycleStepsFor(ledCount);
   const snapped = Math.round(rawPerLed / PER_LED_DELAY_STEP_MS) * PER_LED_DELAY_STEP_MS;
   return clamp(snapped, PER_LED_DELAY_MIN_MS, PER_LED_DELAY_MAX_MS);
 }
 
-export function perLedDelayMsToCycleMs(perLedDelayMs: number): number {
-  return perLedDelayMs * CYCLE_STEPS;
+export function perLedDelayMsToCycleMs(perLedDelayMs: number, ledCount: number): number {
+  return perLedDelayMs * cycleStepsFor(ledCount);
 }
 
 // --- Pulsator-only delay (no Light Bar connected) ---------------------------

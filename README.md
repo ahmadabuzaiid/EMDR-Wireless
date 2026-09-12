@@ -57,29 +57,53 @@ resolved it here.
 ## BLE protocol contract
 
 This is the shared "API" between the firmware and the app - if you change a
-UUID or a validated range on one side, update the other
+UUID, a byte layout, or a validated range on one side, update the other
 (`EmdrWirelessApp/src/ble/constants.ts` and `.../src/utils/rangeMapping.ts`
 mirror everything below).
 
+**Every write's first byte is `PROTOCOL_VERSION` (currently `1`).** Firmware
+rejects (logs and ignores) any write whose first byte doesn't match, rather
+than risk misinterpreting a differently-shaped packet from a mismatched app/
+firmware pair as valid data. Bump this, on both sides together, whenever a
+byte layout below changes.
+
 **Pulsators** - service `4fafc201-1fb5-459e-8fcc-c5c9c331914b`
 
-| Characteristic | UUID | Bytes | Range | Notes |
+| Characteristic | UUID | Bytes | Payload | Notes |
 |---|---|---|---|---|
-| Motor state | `668b943b-2cac-4de0-8091-332dedc91739` | 1 | 0/1 | Write-with-response + write-without-response. Applies instantly. |
-| Motor intensity | `9f1dc367-ee23-4254-a52a-e41b59f50502` | 1 | 40-200 | Raw PWM value. Applies instantly, even mid-buzz. |
+| Motor state | `668b943b-2cac-4de0-8091-332dedc91739` | 2 | `[version, state 0/1]` | Write-with-response + write-without-response. Applies instantly. |
+| Motor intensity | `9f1dc367-ee23-4254-a52a-e41b59f50502` | 2 | `[version, intensity 40-200]` | Raw PWM value. Applies instantly, even mid-buzz. |
+| Device state | see `constants.ts` | 3 | `[version, motor_state, motor_intensity]` | **Read + Notify.** Mirrors what's actually applied - the app reads this once on connect to resync its sliders, so a reconnect never shows stale values. |
 
 **Light Bar** - service `1fb5c201-4faf-459e-8fcc-c5c9c331914b`
 
-| Characteristic | UUID | Bytes | Range | Notes |
+| Characteristic | UUID | Bytes | Payload | Notes |
 |---|---|---|---|---|
-| LED state | `2cac943b-668b-4de0-8091-332dedc91739` | 1 | 0/1 | Turning off applies instantly even mid-sweep. |
-| LED color | `526f1035-4262-4175-8ad0-16387b946fce` | 3 | R,G,B each 0-255 | Raw bytes, not a string. |
-| LED delay | `ee231dc3-9f67-4254-a52a-e41b59f50502` | 1 | 5-75, multiple of 5 | Per-LED step delay (ms) - **not** a full cycle time, see below. |
-| LED sync | `822ff8ad-58e1-44f8-8cb5-f4048a0ee3c3` | 1 | any | Write-without-response trigger, see "Sync model" below. |
+| LED state | `2cac943b-668b-4de0-8091-332dedc91739` | 2 | `[version, state 0/1]` | Turning off applies instantly even mid-sweep. |
+| LED color | `526f1035-4262-4175-8ad0-16387b946fce` | 4 | `[version, R, G, B]` | Raw bytes, not a string. |
+| LED delay | `ee231dc3-9f67-4254-a52a-e41b59f50502` | 2 | `[version, delay 5-75, multiple of 5]` | Per-LED step delay (ms) - **not** a full cycle time, see below. |
+| LED sync | `822ff8ad-58e1-44f8-8cb5-f4048a0ee3c3` | 1 | `[version]` | Write-without-response trigger, see "Sync model" below. |
+| Device state | see `constants.ts` | 6 | `[version, light_state, r, g, b, delay]` | **Read + Notify.** Same resync purpose as the Pulsators' one. |
+
+**Battery Service** (both device types) - standard Bluetooth SIG service, not
+a custom one: service `0000180f-0000-1000-8000-00805f9b34fb`, characteristic
+`00002a19-0000-1000-8000-00805f9b34fb` (Battery Level), 1 byte, `0`-`100`,
+Read + Notify. **No real battery-sensing hardware is confirmed wired yet** -
+the GATT plumbing and app-side read/display are complete, but firmware's
+`readBatteryPercent()` is a placeholder pending an actual voltage-divider
+circuit (see the comment next to it in each `.ino`). The app already
+degrades gracefully if a device never answers on this service.
 
 **Device names** the app scans for (exact match on advertised local name,
 picking strongest RSSI if duplicates are seen - handles multiple kits in one
 room): `"Pulsator 1"`, `"Pulsator 2"`, `"Light Bar"`.
+
+**Auto-reconnect**: the app now retries an unexpected disconnect every 2s,
+indefinitely, as long as that device is still toggled on in Device Select -
+firmware must keep advertising after a drop for this to find it again (both
+sketches already do). A deliberate Disconnect from the Control screen does
+not trigger this. **Write retry**: a failed characteristic write is retried
+up to 3 times, 1s apart, before the app gives up and surfaces an error.
 
 **Design choice**: the app never persists a MAC address across sessions.
 Every connect is a fresh scan; this is deliberate so the same app works

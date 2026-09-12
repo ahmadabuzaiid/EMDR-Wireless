@@ -6,7 +6,12 @@
 
 // LED Strip configuration
 #define LED_PIN 2      // GPIO pin connected to the LED strip
-#define LED_COUNT 20   // Number of LEDs in the strip
+#define LED_COUNT 20   // Number of LEDs in the strip - a hardware constant (the array
+                        // below is sized at compile time), NOT settable over BLE. If you
+                        // change the physical strip length, update this AND the "LED
+                        // count" setting in the app (Settings screen) to match - the app
+                        // uses its own copy of this number purely for its cycle-time-to-
+                        // per-LED-delay math and has no way to read it back from here.
 CRGB leds[LED_COUNT];  // Define the LED strip array
 
 // BLE UUIDs
@@ -15,12 +20,27 @@ CRGB leds[LED_COUNT];  // Define the LED strip array
 #define LED_COLOR_CHARACTERISTIC_UUID "526f1035-4262-4175-8ad0-16387b946fce"
 #define LED_DELAY_CHARACTERISTIC_UUID "ee231dc3-9f67-4254-a52a-e41b59f50502"
 #define LED_SYNC_CHARACTERISTIC_UUID "822ff8ad-58e1-44f8-8cb5-f4048a0ee3c3"
+// Read+Notify: mirrors what was actually applied, so the app can resync its UI
+// after a reconnect instead of guessing/assuming its last-known values are current.
+#define DEVICE_STATE_CHARACTERISTIC_UUID "78cb7a5e-4253-461c-83c5-75d3faa4fe2c"
+
+// Standard Bluetooth SIG Battery Service - the 16-bit UUIDs below expand to the
+// full 128-bit Base UUID automatically.
+#define BATTERY_SERVICE_UUID "180F"
+#define BATTERY_LEVEL_CHARACTERISTIC_UUID "2A19"
 
 // Advertised BLE name. The companion app scans for exactly this name (see
 // EmdrWirelessApp) - there's only ever one Light Bar per kit, so this rarely
 // needs to change, but keeping it here (not in a separate config file) keeps
 // every per-device setting in one visible place across both sketches.
 const String DEVICE_NAME = "Light Bar";
+
+// Bumped whenever a characteristic's byte layout changes. Every write's first byte
+// must match this, or firmware rejects it outright - this is what lets the app
+// detect "this device is running firmware from a different protocol generation"
+// instead of a write silently doing nothing because the old/new layouts happened
+// to both pass the length/range checks. See root README's BLE protocol contract.
+const uint8_t PROTOCOL_VERSION = 1;
 
 // LED defaults
 const uint8_t DEFAULT_LIGHT_R = 0;
@@ -31,6 +51,13 @@ const uint8_t DEFAULT_LIGHT_DELAY = 20;
 // Cap how much a single resync can pull the animation timing in, so a step is never
 // abruptly cut short/stretched enough for the patient to notice
 const uint8_t SYNC_MAX_CORRECTION_PERCENT = 20;
+
+// Battery: no voltage-divider hardware confirmed wired to this pin yet - the GATT
+// plumbing is real and complete, but readBatteryPercent()'s calibration constants
+// are placeholders until real hardware is wired. See that function's comment.
+const int BATTERY_ADC_PIN = 0;
+const unsigned long BATTERY_UPDATE_INTERVAL_MS = 60000;
+unsigned long lastBatteryUpdate = 0;
 
 // LED state variables
 volatile uint8_t light_state = 0;
@@ -56,6 +83,39 @@ volatile uint8_t new_light_delay = DEFAULT_LIGHT_DELAY;
 // BLE state
 volatile bool deviceConnected = false;
 BLEServer* pServer = nullptr;
+BLECharacteristic* pDeviceStateChar = nullptr;
+BLECharacteristic* pBatteryChar = nullptr;
+
+// Pushes the current applied state onto DEVICE_STATE_CHARACTERISTIC and notifies
+// any subscriber - call this after anything that changes the applied light_* fields.
+void updateDeviceState() {
+  if (!pDeviceStateChar) return;
+  uint8_t payload[6] = { PROTOCOL_VERSION, light_state, light_r, light_g, light_b, light_delay };
+  pDeviceStateChar->setValue(payload, 6);
+  pDeviceStateChar->notify();
+}
+
+// TODO: this assumes a 2:1 resistor divider bringing a single-cell LiPo (3.3V empty,
+// 4.2V full) down into the ADC's safe range, on BATTERY_ADC_PIN. No such divider is
+// confirmed wired on current hardware - calibrate or rewire before trusting this
+// value. Until then it reports whatever the floating/undivided pin happens to read.
+uint8_t readBatteryPercent() {
+  const float EMPTY_V = 3.3;
+  const float FULL_V = 4.2;
+  int raw = analogRead(BATTERY_ADC_PIN);
+  float voltage = (raw / 4095.0) * 3.3 * 2.0;
+  float percent = (voltage - EMPTY_V) / (FULL_V - EMPTY_V) * 100.0;
+  if (percent < 0) percent = 0;
+  if (percent > 100) percent = 100;
+  return (uint8_t)percent;
+}
+
+void updateBatteryLevel() {
+  if (!pBatteryChar) return;
+  uint8_t percent = readBatteryPercent();
+  pBatteryChar->setValue(&percent, 1);
+  pBatteryChar->notify();
+}
 
 // Apply new LED parameters after cycle
 void applyPendingValues() {
@@ -79,6 +139,7 @@ void applyPendingValues() {
     }
 
     new_values_pending = false;
+    updateDeviceState();
 
     Serial.println("LED updated with new values");
   }
@@ -89,6 +150,7 @@ class ServerCallbacks : public BLEServerCallbacks {
   void onConnect(BLEServer* pServer) {
     deviceConnected = true;
     Serial.println("Device connected");
+    updateBatteryLevel();
   }
 
   void onDisconnect(BLEServer* pServer) {
@@ -111,6 +173,7 @@ class ServerCallbacks : public BLEServerCallbacks {
     new_values_pending = false;
     FastLED.clear();
     FastLED.show();
+    updateDeviceState();
 
     Serial.println("Device disconnected, LEDs stopped and reset");
   }
@@ -120,8 +183,12 @@ class ServerCallbacks : public BLEServerCallbacks {
 class LedStateCallback : public BLECharacteristicCallbacks {
   void onWrite(BLECharacteristic* pCharacteristic) {
     uint8_t* data = pCharacteristic->getData();
-    if (data && pCharacteristic->getLength() == 1) {
-      uint8_t value = data[0];
+    if (data && pCharacteristic->getLength() == 2) {
+      if (data[0] != PROTOCOL_VERSION) {
+        Serial.println("LED state: protocol version mismatch, ignoring");
+        return;
+      }
+      uint8_t value = data[1];
       Serial.print("Received LED state: ");
       Serial.println(value);
       if (value != 0 && value != 1) {
@@ -142,10 +209,14 @@ class LedStateCallback : public BLECharacteristicCallbacks {
 class LedColorCallback : public BLECharacteristicCallbacks {
   void onWrite(BLECharacteristic* pCharacteristic) {
     uint8_t* data = pCharacteristic->getData();
-    if (data && pCharacteristic->getLength() == 3) {
-      uint8_t r = data[0];
-      uint8_t g = data[1];
-      uint8_t b = data[2];
+    if (data && pCharacteristic->getLength() == 4) {
+      if (data[0] != PROTOCOL_VERSION) {
+        Serial.println("LED color: protocol version mismatch, ignoring");
+        return;
+      }
+      uint8_t r = data[1];
+      uint8_t g = data[2];
+      uint8_t b = data[3];
       Serial.printf("Received LED color: R=%d, G=%d, B=%d\n", r, g, b);
 
       new_light_r = r;
@@ -162,8 +233,12 @@ class LedColorCallback : public BLECharacteristicCallbacks {
 class LedDelayCallback : public BLECharacteristicCallbacks {
   void onWrite(BLECharacteristic* pCharacteristic) {
     uint8_t* data = pCharacteristic->getData();
-    if (data && pCharacteristic->getLength() == 1) {
-      uint8_t value = data[0];
+    if (data && pCharacteristic->getLength() == 2) {
+      if (data[0] != PROTOCOL_VERSION) {
+        Serial.println("LED delay: protocol version mismatch, ignoring");
+        return;
+      }
+      uint8_t value = data[1];
       Serial.print("Received LED delay: ");
       Serial.println(value);
       if (value < 5 || value > 75 || value % 5 != 0) {
@@ -230,6 +305,11 @@ void update_led_animation() {
 // the light bar's cadence with the pulsators without ever visibly skipping a step.
 class LedSyncCallback : public BLECharacteristicCallbacks {
   void onWrite(BLECharacteristic* pCharacteristic) {
+    uint8_t* data = pCharacteristic->getData();
+    if (!data || pCharacteristic->getLength() != 1 || data[0] != PROTOCOL_VERSION) {
+      Serial.println("LED sync: protocol version mismatch, ignoring");
+      return;
+    }
     if (!light_state || !animation_active) return;  // nothing running, nothing to sync
 
     unsigned long now = millis();
@@ -281,7 +361,21 @@ void setup() {
     LED_SYNC_CHARACTERISTIC_UUID, BLECharacteristic::PROPERTY_WRITE | BLECharacteristic::PROPERTY_WRITE_NR);
   pLedSyncChar->setCallbacks(new LedSyncCallback());
 
+  // Device state characteristic (read-back for UI resync on reconnect)
+  pDeviceStateChar = pService->createCharacteristic(
+    DEVICE_STATE_CHARACTERISTIC_UUID, BLECharacteristic::PROPERTY_READ | BLECharacteristic::PROPERTY_NOTIFY);
+  pDeviceStateChar->addDescriptor(new BLE2902());
+  updateDeviceState();
+
   pService->start();
+
+  // Standard Battery Service
+  BLEService* pBatteryService = pServer->createService(BATTERY_SERVICE_UUID);
+  pBatteryChar = pBatteryService->createCharacteristic(
+    BATTERY_LEVEL_CHARACTERISTIC_UUID, BLECharacteristic::PROPERTY_READ | BLECharacteristic::PROPERTY_NOTIFY);
+  pBatteryChar->addDescriptor(new BLE2902());
+  updateBatteryLevel();
+  pBatteryService->start();
 
   BLEAdvertising* pAdvertising = BLEDevice::getAdvertising();
   pAdvertising->addServiceUUID(LIGHTBAR_SERVICE_UUID);
@@ -299,8 +393,15 @@ void loop() {
     pServer->startAdvertising();
     Serial.println("Restarting advertising");
   }
+
   // Update LED animation if active
   if (light_state) {
     update_led_animation();
+  }
+
+  unsigned long now = millis();
+  if (now - lastBatteryUpdate >= BATTERY_UPDATE_INTERVAL_MS) {
+    lastBatteryUpdate = now;
+    updateBatteryLevel();
   }
 }

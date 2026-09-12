@@ -25,17 +25,60 @@ light bar over Bluetooth Low Energy, gated by a one-time activation code.
   points from the same parameters it sent the device, and fires live on/off writes
   to the pulsators at each crossing. This is the same architecture the real EMDR Kit
   Wireless product uses (confirmed from its manual - see project notes).
+- **Every write is versioned.** The first byte of every characteristic write is
+  `PROTOCOL_VERSION` (`src/ble/constants.ts`); firmware rejects anything whose first
+  byte doesn't match, instead of risking a silent misinterpretation if the app and a
+  given physical unit ever drift onto different firmware/app generations.
+- **The app resyncs its UI from the device, not the other way round.** Each device
+  exposes a Read+Notify "device state" characteristic mirroring what's actually
+  applied; the app reads it once right after connecting and seeds the sliders from
+  it, so a reconnect never shows stale values (`BleService.seedStateAndBattery`).
+- **Auto-reconnect + write retry.** An unexpected disconnect is retried every 2s,
+  indefinitely, as long as that device is still toggled on. A failed write is
+  retried up to 3 times, 1s apart, before it's reported as a failure.
+- **Battery level**, when firmware exposes the standard Bluetooth Battery Service,
+  shown next to each device on the Device Select screen. Degrades gracefully
+  (just doesn't show anything) if a device doesn't answer - no real battery-sensing
+  hardware is confirmed wired on the physical units yet, see the root README.
 
 ## Slider ranges (user-facing vs. what's actually sent over BLE)
 
 | Control | Shown to user | Sent to firmware |
 |---|---|---|
-| Pulsator Intensity | 1-160 | 40-200 (linear map, `rangeMapping.ts`) |
-| Cycle Time (Light Bar enabled) | 0.19s-2.85s | per-LED delay 5-75ms, snapped to a multiple of 5 |
+| Pulsator Intensity | 1-16 (step 1) | 40-200 (linear map, `rangeMapping.ts`) |
+| Cycle Time (Light Bar enabled) | 0.19s-2.85s at the default 20-LED count | per-LED delay 5-75ms, snapped to a multiple of 5 |
 | Pulsator Delay (pulsators only) | 0.1s-1.5s | same value, snapped to a multiple of 5ms |
 
 All of this lives in `src/utils/rangeMapping.ts` - screens never talk to firmware
-ranges directly.
+ranges directly. The Cycle Time range depends on the **LED count setting**
+(Control screen -> gear icon -> Settings), since a longer strip takes longer to
+sweep at the same per-LED delay - this is an app-side setting only, since firmware
+can't report its own compiled-in `LED_COUNT` back; keep the setting in sync with
+whatever the physical strip actually is.
+
+## Settings
+
+Reachable from the gear icon on the Control screen:
+
+- **LED Count** - the app-side setting described above (default 20, matching the
+  real Light Bar's firmware default). Persisted locally, independent of any
+  specific device.
+- **Deactivate This Device** - revokes this device's activation from inside the
+  app (confirmed with a current admin code, same TOTP the initial activation
+  used), so a therapist can reset a device without uninstalling/reinstalling.
+  Resets the navigation stack back to Welcome so there's no "back" into a control
+  screen the device is no longer authorized to reach.
+
+## Developing without hardware
+
+Set `USE_MOCK_BLE=true` in `.env` to run the entire app - Welcome through Control,
+every screen, the sync engine - against simulated Pulsators and a simulated Light
+Bar, no ESP32 required. `src/ble/index.ts` is the single seam: everything above it
+(`StimulationEngine`, `SessionContext`, every screen) imports `bleService` from
+there and has no idea whether it's talking to `BleService.ts` (real,
+`react-native-ble-plx`-backed) or `MockBleService.ts` (in-memory, fakes connect
+delays/state echoes/battery). Flip the flag back to `false` (or delete the line)
+to go back to real hardware - no code changes needed either way.
 
 ## OTP activation
 
@@ -138,15 +181,36 @@ just `run-android` (it starts Metro for you if it isn't running).
   confirm the timing/UX holds up - in particular the 6-second scan window
   (`SCAN_WINDOW_MS` in `src/ble/constants.ts`) is a starting guess, not tuned.
 
+## Testing
+
+```bash
+npm test
+```
+
+37 unit tests (Jest, already scaffolded by the RN template) covering everything
+that's pure logic and protocol-critical: TOTP generate/verify behavior, base32/
+base64 round-trips (the exact encoding BLE writes use), and the intensity/cycle-
+time/pulsator-delay range mappings - including that cycle-time conversion always
+snaps to a firmware-valid multiple of 5 and stays within the validated per-LED
+delay range. Deliberately does **not** include a full component/app-render test -
+that needs mocking several native modules (gesture-handler, ble-plx, config,
+async-storage) just to import `App.tsx` at all, which is a bigger, separate
+investment (similar in spirit to a real E2E suite) rather than something folded
+in here.
+
 ## Project structure
 
 ```
 src/
   auth/          OTP activation gate (AsyncStorage flag + TOTP verification)
-  ble/           BLE constants, connection/scanning, and the live stimulation engine
-  context/       SessionContext - shared app state (toggles, connection, session config)
+  ble/           constants, the real (BleService.ts) and mock (MockBleService.ts)
+                 backends behind one shared interface (types.ts), index.ts picks
+                 between them, and the live stimulation engine
+  context/       SessionContext - shared app state (toggles, connection, session
+                 config, LED count setting, battery levels)
   navigation/    Screen stack
-  screens/       Welcome, Otp, DeviceSelect, Control
+  screens/       Welcome, Otp, DeviceSelect, Control, Settings
   theme/         Shared color palette
-  utils/         base32/base64/TOTP/range-mapping/color helpers
+  utils/         base32/base64/TOTP/range-mapping/color helpers, each with unit
+                 tests in utils/__tests__/
 ```

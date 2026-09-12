@@ -1,26 +1,40 @@
-import React, { createContext, useCallback, useContext, useMemo, useState } from 'react';
-import { bleService, DeviceStatus, BluetoothUnavailableError } from '../ble/BleService';
+import React, { createContext, useCallback, useContext, useEffect, useMemo, useState } from 'react';
+import AsyncStorage from '@react-native-async-storage/async-storage';
+import {
+  bleService,
+  DeviceStatus,
+  BluetoothUnavailableError,
+  ParsedDeviceState,
+} from '../ble/index';
 import { stimulationEngine } from '../ble/StimulationEngine';
 import { DeviceRole } from '../ble/constants';
 import {
   intensityUserToFirmware,
+  intensityFirmwareToUser,
+  perLedDelayMsToCycleMs,
+  cycleMsRangeFor,
   INTENSITY_USER_MIN,
   INTENSITY_USER_MAX,
-  CYCLE_MS_MIN,
-  CYCLE_MS_MAX,
+  DEFAULT_LED_COUNT,
+  LED_COUNT_MIN,
+  LED_COUNT_MAX,
   snapPulsatorDelayMs,
 } from '../utils/rangeMapping';
 
 export type RGBColor = { r: number; g: number; b: number };
 
+const LED_COUNT_STORAGE_KEY = 'emdr.settings.ledCount';
+
 interface SessionState {
   pulsatorsEnabled: boolean;
   lightBarEnabled: boolean;
   statuses: Partial<Record<DeviceRole, DeviceStatus>>;
+  batteryLevels: Partial<Record<DeviceRole, number>>;
   intensityUser: number; // 1-16, see rangeMapping
   cycleMs: number; // full round-trip sweep time, used when lightBarEnabled
   pulsatorOnlyDelayMs: number; // used when pulsators run without the light bar
   color: RGBColor;
+  ledCount: number; // app-side setting (Settings screen), persisted
   running: boolean;
   connecting: boolean;
   bleError: 'permissions_denied' | 'powered_off' | null;
@@ -37,6 +51,7 @@ interface SessionContextValue extends SessionState {
   setCycleMs: (value: number) => void;
   setPulsatorOnlyDelayMs: (value: number) => void;
   setColor: (color: RGBColor) => void;
+  setLedCount: (value: number) => void;
   clearLastError: () => void;
   allConnected: boolean;
 }
@@ -53,16 +68,34 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
   const [pulsatorsEnabled, setPulsatorsEnabled] = useState(true);
   const [lightBarEnabled, setLightBarEnabled] = useState(true);
   const [statuses, setStatuses] = useState<Partial<Record<DeviceRole, DeviceStatus>>>({});
+  const [batteryLevels, setBatteryLevels] = useState<Partial<Record<DeviceRole, number>>>({});
   const [intensityUser, setIntensityUserState] = useState(
     Math.round((INTENSITY_USER_MIN + INTENSITY_USER_MAX) / 2),
   );
-  const [cycleMs, setCycleMsState] = useState(Math.round((CYCLE_MS_MIN + CYCLE_MS_MAX) / 2 / 190) * 190);
+  const [ledCount, setLedCountState] = useState(DEFAULT_LED_COUNT);
+  const [cycleMs, setCycleMsState] = useState(() => {
+    const { min, max } = cycleMsRangeFor(DEFAULT_LED_COUNT);
+    return Math.round((min + max) / 2 / 190) * 190;
+  });
   const [pulsatorOnlyDelayMs, setPulsatorOnlyDelayMsState] = useState(500);
   const [color, setColorState] = useState<RGBColor>(DEFAULT_COLOR);
   const [running, setRunning] = useState(false);
   const [connecting, setConnecting] = useState(false);
   const [bleError, setBleError] = useState<'permissions_denied' | 'powered_off' | null>(null);
   const [lastError, setLastError] = useState<string | null>(null);
+
+  useEffect(() => {
+    AsyncStorage.getItem(LED_COUNT_STORAGE_KEY).then(value => {
+      const parsed = value ? parseInt(value, 10) : NaN;
+      if (!Number.isNaN(parsed)) setLedCountState(parsed);
+    });
+  }, []);
+
+  const setLedCount = useCallback((value: number) => {
+    const clamped = Math.round(Math.min(LED_COUNT_MAX, Math.max(LED_COUNT_MIN, value)));
+    setLedCountState(clamped);
+    AsyncStorage.setItem(LED_COUNT_STORAGE_KEY, String(clamped)).catch(() => {});
+  }, []);
 
   const clearLastError = useCallback(() => setLastError(null), []);
 
@@ -75,6 +108,27 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
   const togglePulsators = useCallback(() => setPulsatorsEnabled(v => !v), []);
   const toggleLightBar = useCallback(() => setLightBarEnabled(v => !v), []);
 
+  // Only the one-time initial read (right after connecting) seeds the sliders -
+  // see BleService's ConnectCallbacks doc comment for why notifications afterward
+  // don't keep re-seeding (they're mostly just echoes of our own writes, and
+  // re-applying them live would fight the user's own slider drags).
+  const onStateUpdate = useCallback(
+    (role: DeviceRole, state: ParsedDeviceState, isInitialRead: boolean) => {
+      if (!isInitialRead) return;
+      if (role === 'lightBar' && 'lightState' in state) {
+        setCycleMsState(perLedDelayMsToCycleMs(state.delay, ledCount));
+        setColorState({ r: state.r, g: state.g, b: state.b });
+      } else if (role === 'pulsator1' && 'motorState' in state) {
+        setIntensityUserState(intensityFirmwareToUser(state.motorIntensity));
+      }
+    },
+    [ledCount],
+  );
+
+  const onBatteryUpdate = useCallback((role: DeviceRole, percent: number) => {
+    setBatteryLevels(prev => ({ ...prev, [role]: percent }));
+  }, []);
+
   const connect = useCallback(async () => {
     const roles: DeviceRole[] = [];
     if (pulsatorsEnabled) roles.push('pulsator1', 'pulsator2');
@@ -83,11 +137,14 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
 
     setConnecting(true);
     setStatuses({});
+    setBatteryLevels({});
     setBleError(null);
     setLastError(null);
     try {
-      await bleService.scanAndConnect(roles, (role, status) => {
-        setStatuses(prev => ({ ...prev, [role]: status }));
+      await bleService.scanAndConnect(roles, {
+        onStatusChange: (role, status) => setStatuses(prev => ({ ...prev, [role]: status })),
+        onStateUpdate,
+        onBatteryUpdate,
       });
     } catch (err) {
       if (err instanceof BluetoothUnavailableError) {
@@ -98,7 +155,7 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
     } finally {
       setConnecting(false);
     }
-  }, [pulsatorsEnabled, lightBarEnabled]);
+  }, [pulsatorsEnabled, lightBarEnabled, onStateUpdate, onBatteryUpdate]);
 
   // Best-effort cleanup: always finishes (clears running state, clears connections)
   // even if a BLE write along the way fails, so the caller can always navigate away.
@@ -110,6 +167,7 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
       errors.push(`disconnect: ${describeError(err)}`);
     }
     setStatuses({});
+    setBatteryLevels({});
     setRunning(false);
     reportEngineErrors(errors);
   }, [reportEngineErrors]);
@@ -121,8 +179,9 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
       cycleMs,
       pulsatorOnlyDelayMs,
       color,
+      ledCount,
     }),
-    [pulsatorsEnabled, lightBarEnabled, cycleMs, pulsatorOnlyDelayMs, color],
+    [pulsatorsEnabled, lightBarEnabled, cycleMs, pulsatorOnlyDelayMs, color, ledCount],
   );
 
   // Always flips `running` and reports whatever failed - never gets stuck showing
@@ -194,10 +253,12 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
     pulsatorsEnabled,
     lightBarEnabled,
     statuses,
+    batteryLevels,
     intensityUser,
     cycleMs,
     pulsatorOnlyDelayMs,
     color,
+    ledCount,
     running,
     connecting,
     bleError,
@@ -211,6 +272,7 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
     setCycleMs,
     setPulsatorOnlyDelayMs,
     setColor,
+    setLedCount,
     clearLastError,
     allConnected,
   };

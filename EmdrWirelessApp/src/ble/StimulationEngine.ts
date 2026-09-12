@@ -1,4 +1,4 @@
-import { bleService } from './BleService';
+import { bleService } from './index';
 import { cycleMsToPerLedDelayMs } from '../utils/rangeMapping';
 
 export interface SessionConfig {
@@ -7,6 +7,7 @@ export interface SessionConfig {
   cycleMs: number; // full round-trip sweep time - only meaningful when lightBarEnabled
   pulsatorOnlyDelayMs: number; // only meaningful when pulsators run without the light bar
   color: { r: number; g: number; b: number };
+  ledCount: number; // app-side setting (Settings screen) - must match the physical strip
 }
 
 // How often to re-nudge the Light Bar's phase back toward the app's own timing
@@ -41,7 +42,7 @@ class StimulationEngine {
     const errors: string[] = [];
 
     if (config.lightBarEnabled) {
-      const perLedDelayMs = cycleMsToPerLedDelayMs(config.cycleMs);
+      const perLedDelayMs = cycleMsToPerLedDelayMs(config.cycleMs, config.ledCount);
       await this.safe(errors, 'set light delay', () => bleService.writeLedDelay(perLedDelayMs));
       await this.safe(errors, 'set light color', () =>
         bleService.writeLedColor(config.color.r, config.color.g, config.color.b),

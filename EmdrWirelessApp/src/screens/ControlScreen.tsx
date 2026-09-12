@@ -12,8 +12,7 @@ import { rgbToHex, hexToRgb } from '../utils/color';
 import {
   INTENSITY_USER_MIN,
   INTENSITY_USER_MAX,
-  CYCLE_MS_MIN,
-  CYCLE_MS_MAX,
+  cycleMsRangeFor,
   PULSATOR_DELAY_MIN_MS,
   PULSATOR_DELAY_MAX_MS,
   msToSecondsLabel,
@@ -35,6 +34,7 @@ export default function ControlScreen() {
     setPulsatorOnlyDelayMs,
     color,
     setColor,
+    ledCount,
     running,
     toggleRunning,
     disconnect,
@@ -48,9 +48,10 @@ export default function ControlScreen() {
   );
   const activeCount = (pulsatorsEnabled ? 2 : 0) + (lightBarEnabled ? 1 : 0);
 
+  const lightBarCycleRange = useMemo(() => cycleMsRangeFor(ledCount), [ledCount]);
   const timingMs = lightBarEnabled ? cycleMs : pulsatorOnlyDelayMs;
-  const timingMin = lightBarEnabled ? CYCLE_MS_MIN : PULSATOR_DELAY_MIN_MS;
-  const timingMax = lightBarEnabled ? CYCLE_MS_MAX : PULSATOR_DELAY_MAX_MS;
+  const timingMin = lightBarEnabled ? lightBarCycleRange.min : PULSATOR_DELAY_MIN_MS;
+  const timingMax = lightBarEnabled ? lightBarCycleRange.max : PULSATOR_DELAY_MAX_MS;
   const timingLabel = lightBarEnabled ? 'Cycle Time' : 'Pulsator Delay';
   const onTimingChange = lightBarEnabled ? setCycleMs : setPulsatorOnlyDelayMs;
 
@@ -71,11 +72,21 @@ export default function ControlScreen() {
       <ScrollView contentContainerStyle={styles.container}>
         <View style={styles.headerRow}>
           <Text style={styles.title}>Session Control</Text>
-          <View style={styles.badge}>
-            <View style={styles.badgeDot} />
-            <Text style={styles.badgeText}>
-              {connectedCount}/{activeCount} connected
-            </Text>
+          <View style={styles.headerActions}>
+            <View style={styles.badge}>
+              <View style={styles.badgeDot} />
+              <Text style={styles.badgeText}>
+                {connectedCount}/{activeCount} connected
+              </Text>
+            </View>
+            <Pressable
+              style={styles.settingsButton}
+              onPress={() => navigation.navigate('Settings')}
+              accessibilityRole="button"
+              accessibilityLabel="Settings"
+            >
+              <View style={styles.settingsIcon} />
+            </Pressable>
           </View>
         </View>
 
@@ -173,6 +184,23 @@ const styles = StyleSheet.create({
   container: { flexGrow: 1, padding: 24, paddingTop: 32, gap: 22 },
   headerRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
   title: { fontSize: 22, fontWeight: '700', color: colors.text },
+  headerActions: { flexDirection: 'row', alignItems: 'center', gap: 10 },
+  settingsButton: {
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    borderWidth: 1,
+    borderColor: colors.border,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  settingsIcon: {
+    width: 16,
+    height: 16,
+    borderRadius: 8,
+    borderWidth: 4,
+    borderColor: colors.textMuted,
+  },
   badge: {
     flexDirection: 'row',
     alignItems: 'center',

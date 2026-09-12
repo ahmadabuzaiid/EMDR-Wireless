@@ -6,6 +6,7 @@ import WelcomeScreen from '../screens/WelcomeScreen';
 import OtpScreen from '../screens/OtpScreen';
 import DeviceSelectScreen from '../screens/DeviceSelectScreen';
 import ControlScreen from '../screens/ControlScreen';
+import SettingsScreen from '../screens/SettingsScreen';
 
 const Stack = createNativeStackNavigator<RootStackParamList>();
 
@@ -17,6 +18,7 @@ export default function RootNavigator() {
         <Stack.Screen name="Otp" component={OtpScreen} />
         <Stack.Screen name="DeviceSelect" component={DeviceSelectScreen} />
         <Stack.Screen name="Control" component={ControlScreen} />
+        <Stack.Screen name="Settings" component={SettingsScreen} />
       </Stack.Navigator>
     </NavigationContainer>
   );
