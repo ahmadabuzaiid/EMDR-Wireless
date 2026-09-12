@@ -104,7 +104,10 @@ void updateDeviceState() {
   if (!pDeviceStateChar) return;
   uint8_t payload[6] = { PROTOCOL_VERSION, light_state, light_r, light_g, light_b, light_delay };
   pDeviceStateChar->setValue(payload, 6);
-  pDeviceStateChar->notify();
+  // Only notify once a client is actually connected/subscribed - calling notify()
+  // this early (e.g. from setup(), before any connection exists) crashed this
+  // exact sketch with a Load access fault, so this guard is load-bearing.
+  if (deviceConnected) pDeviceStateChar->notify();
 }
 
 uint8_t readBatteryPercent() {
@@ -122,7 +125,7 @@ void updateBatteryLevel() {
   if (!pBatteryChar) return;
   uint8_t percent = readBatteryPercent();
   pBatteryChar->setValue(&percent, 1);
-  pBatteryChar->notify();
+  if (deviceConnected) pBatteryChar->notify();
 }
 
 // Brief blink(s) to acknowledge a write that has no natural steady-state visual
@@ -270,7 +273,11 @@ void setup() {
     LED_SYNC_CHARACTERISTIC_UUID, BLECharacteristic::PROPERTY_WRITE | BLECharacteristic::PROPERTY_WRITE_NR);
   pLedSyncChar->setCallbacks(new LedSyncCallback());
 
-  // Device state characteristic (read-back for UI resync on reconnect)
+  // Device state characteristic (read-back for UI resync on reconnect).
+  // NOTE: the esp32 core does warn that manually adding a BLE2902 descriptor is
+  // deprecated (NimBLE auto-adds the CCCD for NOTIFY characteristics) - but
+  // removing it caused an immediate boot crash (Load access fault) on real
+  // hardware, so it stays until that's root-caused properly. Warning > crash.
   pDeviceStateChar = pService->createCharacteristic(
     DEVICE_STATE_CHARACTERISTIC_UUID, BLECharacteristic::PROPERTY_READ | BLECharacteristic::PROPERTY_NOTIFY);
   pDeviceStateChar->addDescriptor(new BLE2902());

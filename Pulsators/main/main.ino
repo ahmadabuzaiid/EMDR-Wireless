@@ -57,7 +57,10 @@ void updateDeviceState() {
   if (!pDeviceStateChar) return;
   uint8_t payload[3] = { PROTOCOL_VERSION, motor_state, motor_intensity };
   pDeviceStateChar->setValue(payload, 3);
-  pDeviceStateChar->notify();
+  // Only notify once a client is actually connected/subscribed - calling notify()
+  // this early (e.g. from setup(), before any connection exists) crashed the
+  // Light Bar Test Rig with a Load access fault, so this guard is load-bearing.
+  if (deviceConnected) pDeviceStateChar->notify();
 }
 
 // TODO: this assumes a 2:1 resistor divider bringing a single-cell LiPo (3.3V empty,
@@ -79,7 +82,7 @@ void updateBatteryLevel() {
   if (!pBatteryChar) return;
   uint8_t percent = readBatteryPercent();
   pBatteryChar->setValue(&percent, 1);
-  pBatteryChar->notify();
+  if (deviceConnected) pBatteryChar->notify();
 }
 
 // BLE Server callbacks
@@ -175,7 +178,11 @@ void setup() {
     MOTOR_INTENSITY_CHARACTERISTIC_UUID, BLECharacteristic::PROPERTY_WRITE);
   pMotorIntensityChar->setCallbacks(new MotorIntensityCallback());
 
-  // Device state characteristic (read-back for UI resync on reconnect)
+  // Device state characteristic (read-back for UI resync on reconnect).
+  // NOTE: the esp32 core does warn that manually adding a BLE2902 descriptor is
+  // deprecated (NimBLE auto-adds the CCCD for NOTIFY characteristics) - but
+  // removing it caused an immediate boot crash (Load access fault) on real
+  // hardware, so it stays until that's root-caused properly. Warning > crash.
   pDeviceStateChar = pService->createCharacteristic(
     DEVICE_STATE_CHARACTERISTIC_UUID, BLECharacteristic::PROPERTY_READ | BLECharacteristic::PROPERTY_NOTIFY);
   pDeviceStateChar->addDescriptor(new BLE2902());
