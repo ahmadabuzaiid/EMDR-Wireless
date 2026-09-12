@@ -1,5 +1,6 @@
 import React, { useMemo } from 'react';
-import { View, Text, Pressable, StyleSheet, SafeAreaView, ScrollView } from 'react-native';
+import { View, Text, Pressable, StyleSheet, ScrollView } from 'react-native';
+import { SafeAreaView } from 'react-native-safe-area-context';
 import Slider from '@react-native-community/slider';
 import ColorPicker from 'react-native-wheel-color-picker';
 import { useNavigation } from '@react-navigation/native';
@@ -37,6 +38,8 @@ export default function ControlScreen() {
     running,
     toggleRunning,
     disconnect,
+    lastError,
+    clearLastError,
   } = useSession();
 
   const connectedCount = useMemo(
@@ -52,7 +55,14 @@ export default function ControlScreen() {
   const onTimingChange = lightBarEnabled ? setCycleMs : setPulsatorOnlyDelayMs;
 
   const onDisconnect = async () => {
-    await disconnect();
+    // Best-effort: disconnect() itself never throws, but this still guarantees
+    // navigation happens regardless, so a BLE hiccup can never strand the user
+    // on this screen with no way back to Device Select.
+    try {
+      await disconnect();
+    } catch (err) {
+      console.warn('Disconnect failed:', err);
+    }
     navigation.replace('DeviceSelect');
   };
 
@@ -68,6 +78,13 @@ export default function ControlScreen() {
             </Text>
           </View>
         </View>
+
+        {lastError && (
+          <Pressable style={styles.errorBanner} onPress={clearLastError} accessibilityRole="button">
+            <Text style={styles.errorBannerText}>{lastError}</Text>
+            <Text style={styles.errorBannerDismiss}>Tap to dismiss</Text>
+          </Pressable>
+        )}
 
         {pulsatorsEnabled && (
           <View style={styles.card}>
@@ -167,6 +184,13 @@ const styles = StyleSheet.create({
   },
   badgeDot: { width: 7, height: 7, borderRadius: 4, backgroundColor: colors.success },
   badgeText: { fontSize: 12, fontWeight: '600', color: colors.success },
+  errorBanner: {
+    backgroundColor: '#FDECEC',
+    borderRadius: 12,
+    padding: 14,
+  },
+  errorBannerText: { fontSize: 13, color: colors.danger, fontWeight: '600' },
+  errorBannerDismiss: { fontSize: 11, color: colors.danger, marginTop: 4, opacity: 0.7 },
   card: {
     backgroundColor: colors.surface,
     borderWidth: 1,

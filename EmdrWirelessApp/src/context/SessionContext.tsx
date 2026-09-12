@@ -24,6 +24,7 @@ interface SessionState {
   running: boolean;
   connecting: boolean;
   bleError: 'permissions_denied' | 'powered_off' | null;
+  lastError: string | null;
 }
 
 interface SessionContextValue extends SessionState {
@@ -36,12 +37,17 @@ interface SessionContextValue extends SessionState {
   setCycleMs: (value: number) => void;
   setPulsatorOnlyDelayMs: (value: number) => void;
   setColor: (color: RGBColor) => void;
+  clearLastError: () => void;
   allConnected: boolean;
 }
 
 const SessionContext = createContext<SessionContextValue | null>(null);
 
 const DEFAULT_COLOR: RGBColor = { r: 66, g: 165, b: 173 };
+
+function describeError(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
+}
 
 export function SessionProvider({ children }: { children: React.ReactNode }) {
   const [pulsatorsEnabled, setPulsatorsEnabled] = useState(true);
@@ -56,6 +62,15 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
   const [running, setRunning] = useState(false);
   const [connecting, setConnecting] = useState(false);
   const [bleError, setBleError] = useState<'permissions_denied' | 'powered_off' | null>(null);
+  const [lastError, setLastError] = useState<string | null>(null);
+
+  const clearLastError = useCallback(() => setLastError(null), []);
+
+  // Turns a batch of per-operation failure strings (from StimulationEngine) into
+  // one banner message, or clears the banner when nothing failed.
+  const reportEngineErrors = useCallback((errors: string[]) => {
+    setLastError(errors.length > 0 ? errors.join('; ') : null);
+  }, []);
 
   const togglePulsators = useCallback(() => setPulsatorsEnabled(v => !v), []);
   const toggleLightBar = useCallback(() => setLightBarEnabled(v => !v), []);
@@ -69,6 +84,7 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
     setConnecting(true);
     setStatuses({});
     setBleError(null);
+    setLastError(null);
     try {
       await bleService.scanAndConnect(roles, (role, status) => {
         setStatuses(prev => ({ ...prev, [role]: status }));
@@ -77,19 +93,26 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
       if (err instanceof BluetoothUnavailableError) {
         setBleError(err.reason);
       } else {
-        throw err;
+        setLastError(`Connecting failed: ${describeError(err)}`);
       }
     } finally {
       setConnecting(false);
     }
   }, [pulsatorsEnabled, lightBarEnabled]);
 
+  // Best-effort cleanup: always finishes (clears running state, clears connections)
+  // even if a BLE write along the way fails, so the caller can always navigate away.
   const disconnect = useCallback(async () => {
-    await stimulationEngine.stop();
-    await bleService.disconnectAll();
+    const errors = await stimulationEngine.stop();
+    try {
+      await bleService.disconnectAll();
+    } catch (err) {
+      errors.push(`disconnect: ${describeError(err)}`);
+    }
     setStatuses({});
     setRunning(false);
-  }, []);
+    reportEngineErrors(errors);
+  }, [reportEngineErrors]);
 
   const buildConfig = useCallback(
     () => ({
@@ -102,35 +125,39 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
     [pulsatorsEnabled, lightBarEnabled, cycleMs, pulsatorOnlyDelayMs, color],
   );
 
+  // Always flips `running` and reports whatever failed - never gets stuck showing
+  // "Start Session" just because one BLE write along the way had a problem.
   const toggleRunning = useCallback(async () => {
     if (running) {
-      await stimulationEngine.stop();
+      const errors = await stimulationEngine.stop();
       setRunning(false);
+      reportEngineErrors(errors);
     } else {
-      await stimulationEngine.start(buildConfig());
-      await stimulationEngine.setIntensity(intensityUserToFirmware(intensityUser));
+      const startErrors = await stimulationEngine.start(buildConfig());
+      const intensityErrors = await stimulationEngine.setIntensity(intensityUserToFirmware(intensityUser));
       setRunning(true);
+      reportEngineErrors([...startErrors, ...intensityErrors]);
     }
-  }, [running, buildConfig, intensityUser]);
+  }, [running, buildConfig, intensityUser, reportEngineErrors]);
 
   const setIntensityUser = useCallback(
     (value: number) => {
       setIntensityUserState(value);
       if (running) {
-        stimulationEngine.setIntensity(intensityUserToFirmware(value)).catch(() => {});
+        stimulationEngine.setIntensity(intensityUserToFirmware(value)).then(reportEngineErrors);
       }
     },
-    [running],
+    [running, reportEngineErrors],
   );
 
   const setCycleMs = useCallback(
     (value: number) => {
       setCycleMsState(value);
       if (running) {
-        stimulationEngine.updateTiming({ ...buildConfig(), cycleMs: value }).catch(() => {});
+        stimulationEngine.updateTiming({ ...buildConfig(), cycleMs: value }).then(reportEngineErrors);
       }
     },
-    [running, buildConfig],
+    [running, buildConfig, reportEngineErrors],
   );
 
   const setPulsatorOnlyDelayMs = useCallback(
@@ -140,20 +167,20 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
       if (running) {
         stimulationEngine
           .updateTiming({ ...buildConfig(), pulsatorOnlyDelayMs: snapped })
-          .catch(() => {});
+          .then(reportEngineErrors);
       }
     },
-    [running, buildConfig],
+    [running, buildConfig, reportEngineErrors],
   );
 
   const setColor = useCallback(
     (next: RGBColor) => {
       setColorState(next);
       if (running) {
-        stimulationEngine.setColor(next.r, next.g, next.b).catch(() => {});
+        stimulationEngine.setColor(next.r, next.g, next.b).then(reportEngineErrors);
       }
     },
-    [running],
+    [running, reportEngineErrors],
   );
 
   const allConnected = useMemo(() => {
@@ -174,6 +201,7 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
     running,
     connecting,
     bleError,
+    lastError,
     togglePulsators,
     toggleLightBar,
     connect,
@@ -183,6 +211,7 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
     setCycleMs,
     setPulsatorOnlyDelayMs,
     setColor,
+    clearLastError,
     allConnected,
   };
 

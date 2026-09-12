@@ -52,6 +52,21 @@ server-side**, so the secret never ships in the app at all - worth doing if this
 ever needs to be more than a "contact the provider" gate. Not built, since it pulls
 in backend infrastructure this project doesn't otherwise need.
 
+**Real bug this caused once, worth knowing about**: `react-native-config` reads
+`.env` values off the generated `BuildConfig` class via *reflection*
+(`RNCConfigModuleImpl.getConfig()`), not a static reference. R8 can't see a
+reflective access, so with minification on it silently stripped/renamed
+`BuildConfig`'s fields, and `Config.OTP_SECRET` came back `undefined` in JS on a
+real device - while the value was still correctly present in the generated
+`BuildConfig.java` at build time, making it look like a `.env`/build-time problem
+when it was actually purely an R8 stripping problem. Fixed with a targeted keep
+rule in `android/app/proguard-rules.pro`
+(`-keep class com.emdrwirelessapp.BuildConfig { *; }`) rather than disabling
+minification - if `Config.SOMETHING` ever silently comes back empty again on a
+release build (debug builds skip R8 entirely, so this class of bug never shows up
+there), check that keep rule survived and still matches the app's actual package
+name before suspecting anything else.
+
 To generate (or rotate) the secret:
 
 ```bash
