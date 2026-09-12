@@ -89,7 +89,6 @@ void updateBatteryLevel() {
 class ServerCallbacks : public BLEServerCallbacks {
   void onConnect(BLEServer* pServer) {
     deviceConnected = true;
-    Serial.println("Device connected");
     updateBatteryLevel();
   }
 
@@ -101,8 +100,6 @@ class ServerCallbacks : public BLEServerCallbacks {
     motor_intensity = DEFAULT_MOTOR_INTENSITY;
     analogWrite(MOTOR_PIN, 0);
     updateDeviceState();
-
-    Serial.println("Device disconnected, motor stopped and reset");
   }
 };
 
@@ -111,17 +108,9 @@ class MotorStateCallback : public BLECharacteristicCallbacks {
   void onWrite(BLECharacteristic* pCharacteristic) {
     uint8_t* data = pCharacteristic->getData();
     if (data && pCharacteristic->getLength() == 2) {
-      if (data[0] != PROTOCOL_VERSION) {
-        Serial.println("Motor state: protocol version mismatch, ignoring");
-        return;
-      }
+      if (data[0] != PROTOCOL_VERSION) return;
       uint8_t value = data[1];
-      Serial.print("Received motor state: ");
-      Serial.println(value);
-      if (value != 0 && value != 1) {
-        Serial.println("Invalid motor state");
-        return;
-      }
+      if (value != 0 && value != 1) return;
 
       motor_state = value;
       analogWrite(MOTOR_PIN, motor_state ? motor_intensity : 0);
@@ -135,18 +124,9 @@ class MotorIntensityCallback : public BLECharacteristicCallbacks {
   void onWrite(BLECharacteristic* pCharacteristic) {
     uint8_t* data = pCharacteristic->getData();
     if (data && pCharacteristic->getLength() == 2) {
-      if (data[0] != PROTOCOL_VERSION) {
-        Serial.println("Motor intensity: protocol version mismatch, ignoring");
-        return;
-      }
+      if (data[0] != PROTOCOL_VERSION) return;
       uint8_t value = data[1];
-      Serial.print("Received motor intensity: ");
-      Serial.println(value);
-
-      if (value < 40 || value > 200) {
-        Serial.println("Invalid motor intensity");
-        return;
-      }
+      if (value < 40 || value > 200) return;
 
       motor_intensity = value;
       if (motor_state) analogWrite(MOTOR_PIN, motor_intensity);
@@ -156,9 +136,6 @@ class MotorIntensityCallback : public BLECharacteristicCallbacks {
 };
 
 void setup() {
-  Serial.begin(115200);
-  Serial.println("Starting EMDR Pulsator BLE Server...");
-
   pinMode(MOTOR_PIN, OUTPUT);
   analogWrite(MOTOR_PIN, 0);
 
@@ -173,9 +150,10 @@ void setup() {
     MOTOR_STATE_CHARACTERISTIC_UUID, BLECharacteristic::PROPERTY_WRITE | BLECharacteristic::PROPERTY_WRITE_NR);
   pMotorStateChar->setCallbacks(new MotorStateCallback());
 
-  // Motor intensity characteristic
+  // Motor intensity characteristic - WRITE_NR too, so the app can send it without
+  // waiting for an ATT round-trip (see EmdrWirelessApp/src/ble/BleService.ts).
   BLECharacteristic* pMotorIntensityChar = pService->createCharacteristic(
-    MOTOR_INTENSITY_CHARACTERISTIC_UUID, BLECharacteristic::PROPERTY_WRITE);
+    MOTOR_INTENSITY_CHARACTERISTIC_UUID, BLECharacteristic::PROPERTY_WRITE | BLECharacteristic::PROPERTY_WRITE_NR);
   pMotorIntensityChar->setCallbacks(new MotorIntensityCallback());
 
   // Device state characteristic (read-back for UI resync on reconnect).
@@ -204,15 +182,12 @@ void setup() {
   pAdvertising->setMinPreferred(0x06);  // 7.5ms
   pAdvertising->setMaxPreferred(0x12);  // 22.5ms
   BLEDevice::startAdvertising();
-
-  Serial.println("BLE server started and advertising...");
 }
 
 void loop() {
   while (!deviceConnected) {
     delay(500);
     pServer->startAdvertising();
-    Serial.println("Restarting advertising");
   }
 
   unsigned long now = millis();

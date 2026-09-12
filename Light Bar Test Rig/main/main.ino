@@ -10,11 +10,16 @@
 //
 // The built-in LED on this board turned out to be a PLAIN single LED (confirmed by
 // testing - not the WS2812 addressable RGB pixel some SuperMini variants have), so
-// it can't display arbitrary colors. It's driven with plain PWM instead: color
-// writes are reflected as brightness (perceived luminance of the RGB value), state
-// on/off is on/off, and delay/sync writes still get their own distinct blink pattern.
-// No sweep animation, no drift correction - those only make sense across a real
-// multi-LED strip.
+// it can't display arbitrary colors - LED_COLOR writes are still received, stored,
+// and echoed back on DEVICE_STATE_CHARACTERISTIC, but have no visible effect here.
+//
+// What it DOES simulate is the real Light Bar's sweep timing: it runs the exact
+// same position/direction/dwell-time engine as "Light Bar/main/main.ino" (including
+// the 2x end-LED dwell and the LED_SYNC phase-nudge), just without a strip to
+// render to. The built-in LED is lit for one direction of the simulated sweep and
+// off for the other - so you can watch it alongside the Pulsators Test Rigs and
+// visually confirm they're switching at the same instant the sweep reverses (see
+// StimulationEngine.ts's alternation timing: fullDelayMs * ledCount).
 // ============================================================================
 
 #include <BLE2902.h>
@@ -28,6 +33,13 @@
 // Most SuperMini onboard LEDs are wired active-low (LOW = on). If state=1 doesn't
 // turn the LED on, flip this.
 const bool LED_ACTIVE_LOW = true;
+const uint8_t ON_BRIGHTNESS = 255;
+
+// Purely a timing simulation parameter - there's no physical strip, but the sweep's
+// direction-reversal timing depends on it exactly the way the real Light Bar's
+// LED_COUNT does. Must match the app's Settings -> LED Count setting for the
+// pulsator-sync test described above to actually line up.
+#define SIMULATED_LED_COUNT 20
 
 // BLE UUIDs - identical to the real Light Bar, so the app doesn't need to know
 // it's talking to a test rig instead of the real hardware.
@@ -60,7 +72,11 @@ const uint8_t DEFAULT_LIGHT_R = 0;
 const uint8_t DEFAULT_LIGHT_G = 0;
 const uint8_t DEFAULT_LIGHT_B = 0;
 const uint8_t DEFAULT_LIGHT_DELAY = 20;
-const uint8_t ACK_BRIGHTNESS = 60; // dim-ish, so ack blinks are visible but not blinding
+
+// Cap how much a single resync can pull the animation timing in, so a step is never
+// abruptly cut short/stretched enough to be visually jarring - same rule as the real
+// Light Bar.
+const uint8_t SYNC_MAX_CORRECTION_PERCENT = 20;
 
 // Battery: no voltage-divider hardware confirmed wired to this pin yet - the GATT
 // plumbing is real and complete, but readBatteryPercent()'s calibration constants
@@ -69,13 +85,26 @@ const int BATTERY_ADC_PIN = 0;
 const unsigned long BATTERY_UPDATE_INTERVAL_MS = 60000;
 unsigned long lastBatteryUpdate = 0;
 
-// Current state - every write below applies immediately since there's no
-// animation cycle here to protect from a mid-cycle interruption.
-uint8_t light_state = 0;
-uint8_t light_r = DEFAULT_LIGHT_R;
-uint8_t light_g = DEFAULT_LIGHT_G;
-uint8_t light_b = DEFAULT_LIGHT_B;
-uint8_t light_delay = DEFAULT_LIGHT_DELAY;
+// Applied state
+volatile uint8_t light_state = 0;
+volatile uint8_t light_r = DEFAULT_LIGHT_R;
+volatile uint8_t light_g = DEFAULT_LIGHT_G;
+volatile uint8_t light_b = DEFAULT_LIGHT_B;
+volatile uint8_t light_delay = DEFAULT_LIGHT_DELAY;
+
+// Simulated sweep position/direction - same roles as the real Light Bar's.
+volatile int current_led = 0;
+volatile bool forward_direction = true;
+volatile unsigned long last_led_update = 0;
+volatile bool animation_active = false;
+
+// For handling new values between simulated sweep passes, same as the real Light Bar.
+volatile bool new_values_pending = false;
+volatile uint8_t new_light_state = 0;
+volatile uint8_t new_light_r = DEFAULT_LIGHT_R;
+volatile uint8_t new_light_g = DEFAULT_LIGHT_G;
+volatile uint8_t new_light_b = DEFAULT_LIGHT_B;
+volatile uint8_t new_light_delay = DEFAULT_LIGHT_DELAY;
 
 volatile bool deviceConnected = false;
 BLEServer* pServer = nullptr;
@@ -87,15 +116,11 @@ void setLedLevel(uint8_t brightness) {
   analogWrite(LED_PIN, LED_ACTIVE_LOW ? (255 - brightness) : brightness);
 }
 
-// Perceived-luminance approximation (0.299R + 0.587G + 0.114B in fixed point),
-// so a color write is reflected as "how bright would this color look" rather
-// than picking one channel arbitrarily.
-uint8_t colorToBrightness(uint8_t r, uint8_t g, uint8_t b) {
-  return (uint8_t)(((uint16_t)r * 77 + (uint16_t)g * 151 + (uint16_t)b * 28) >> 8);
-}
-
+// Lit only while the sweep is "running" AND currently in its forward pass - off
+// during the return pass. This is the whole point of this sketch: a clean on/off
+// signal you can compare against the Pulsators Test Rigs' own on/off timing.
 void showCurrentState() {
-  setLedLevel(light_state ? colorToBrightness(light_r, light_g, light_b) : 0);
+  setLedLevel((light_state && forward_direction) ? ON_BRIGHTNESS : 0);
 }
 
 // Pushes the current applied state onto DEVICE_STATE_CHARACTERISTIC and notifies
@@ -128,16 +153,28 @@ void updateBatteryLevel() {
   if (deviceConnected) pBatteryChar->notify();
 }
 
-// Brief blink(s) to acknowledge a write that has no natural steady-state visual
-// of its own (delay/sync), then restores whatever was showing before.
-void blinkAck(uint8_t times) {
-  for (uint8_t i = 0; i < times; i++) {
-    setLedLevel(ACK_BRIGHTNESS);
-    delay(80);
-    setLedLevel(0);
-    delay(80);
+// Apply new parameters at a safe point in the simulated sweep (see LedStateCallback/
+// LedDelayCallback for when this gets called immediately vs. deferred).
+void applyPendingValues() {
+  if (new_values_pending) {
+    light_state = new_light_state;
+    light_r = new_light_r;
+    light_g = new_light_g;
+    light_b = new_light_b;
+    light_delay = new_light_delay;
+
+    if (!light_state) {
+      animation_active = false;
+    } else if (!animation_active) {
+      current_led = 0;
+      forward_direction = true;
+      animation_active = true;
+    }
+    showCurrentState();
+
+    new_values_pending = false;
+    updateDeviceState();
   }
-  showCurrentState();
 }
 
 void resetToDefaults() {
@@ -146,6 +183,15 @@ void resetToDefaults() {
   light_g = DEFAULT_LIGHT_G;
   light_b = DEFAULT_LIGHT_B;
   light_delay = DEFAULT_LIGHT_DELAY;
+  current_led = 0;
+  forward_direction = true;
+  animation_active = false;
+  new_light_state = 0;
+  new_light_r = DEFAULT_LIGHT_R;
+  new_light_g = DEFAULT_LIGHT_G;
+  new_light_b = DEFAULT_LIGHT_B;
+  new_light_delay = DEFAULT_LIGHT_DELAY;
+  new_values_pending = false;
   showCurrentState();
   updateDeviceState();
 }
@@ -153,14 +199,12 @@ void resetToDefaults() {
 class ServerCallbacks : public BLEServerCallbacks {
   void onConnect(BLEServer* pServer) {
     deviceConnected = true;
-    Serial.println("Device connected");
     updateBatteryLevel();
   }
 
   void onDisconnect(BLEServer* pServer) {
     deviceConnected = false;
     resetToDefaults();
-    Serial.println("Device disconnected, reset to defaults");
   }
 };
 
@@ -168,21 +212,14 @@ class LedStateCallback : public BLECharacteristicCallbacks {
   void onWrite(BLECharacteristic* pCharacteristic) {
     uint8_t* data = pCharacteristic->getData();
     if (data && pCharacteristic->getLength() == 2) {
-      if (data[0] != PROTOCOL_VERSION) {
-        Serial.println("LED state: protocol version mismatch, ignoring");
-        return;
-      }
+      if (data[0] != PROTOCOL_VERSION) return;
       uint8_t value = data[1];
-      Serial.print("Received LED state: ");
-      Serial.println(value);
-      if (value != 0 && value != 1) {
-        Serial.println("Invalid LED state");
-        return;
-      }
+      if (value != 0 && value != 1) return;
 
-      light_state = value;
-      showCurrentState();
-      updateDeviceState();
+      new_light_state = value;
+      new_values_pending = true;
+      // Turning off shouldn't wait for the sweep to reach an end
+      if (!light_state || !animation_active || !value) applyPendingValues();
     }
   }
 };
@@ -191,19 +228,17 @@ class LedColorCallback : public BLECharacteristicCallbacks {
   void onWrite(BLECharacteristic* pCharacteristic) {
     uint8_t* data = pCharacteristic->getData();
     if (data && pCharacteristic->getLength() == 4) {
-      if (data[0] != PROTOCOL_VERSION) {
-        Serial.println("LED color: protocol version mismatch, ignoring");
-        return;
-      }
+      if (data[0] != PROTOCOL_VERSION) return;
       uint8_t r = data[1];
       uint8_t g = data[2];
       uint8_t b = data[3];
-      Serial.printf("Received LED color: R=%d, G=%d, B=%d\n", r, g, b);
 
+      // No physical effect on this board (see file header) - stored and applied
+      // immediately purely so DEVICE_STATE_CHARACTERISTIC echoes back what was
+      // actually written, same as every other characteristic here.
       light_r = r;
       light_g = g;
       light_b = b;
-      showCurrentState();
       updateDeviceState();
     }
   }
@@ -213,42 +248,80 @@ class LedDelayCallback : public BLECharacteristicCallbacks {
   void onWrite(BLECharacteristic* pCharacteristic) {
     uint8_t* data = pCharacteristic->getData();
     if (data && pCharacteristic->getLength() == 2) {
-      if (data[0] != PROTOCOL_VERSION) {
-        Serial.println("LED delay: protocol version mismatch, ignoring");
-        return;
-      }
+      if (data[0] != PROTOCOL_VERSION) return;
       uint8_t value = data[1];
-      Serial.print("Received LED delay: ");
-      Serial.println(value);
-      if (value < 20 || value > 100 || value % 5 != 0) {
-        Serial.println("Invalid LED delay");
-        return;
-      }
+      if (value < 20 || value > 100 || value % 5 != 0) return;
 
-      light_delay = value;
-      updateDeviceState();
-      blinkAck(2); // two quick blinks = "delay received"
+      new_light_delay = value;
+      new_values_pending = true;
+      if (!light_state || !animation_active) applyPendingValues();
     }
   }
 };
 
+// The two ends of the simulated sweep (where direction reverses) dwell for 2x
+// light_delay instead of 1x - identical rule to the real Light Bar, and for the
+// same reason: it's what makes fullDelayMs * SIMULATED_LED_COUNT (the pulsators'
+// alternation period) line up exactly with a real one-way pass. See the comment
+// on dwellMsFor() in "Light Bar/main/main.ino" for the full derivation.
+unsigned long dwellMsFor(int ledIndex) {
+  bool atEnd = (ledIndex == 0) || (ledIndex == SIMULATED_LED_COUNT - 1);
+  return (unsigned long)light_delay * (atEnd ? 2 : 1);
+}
+
+// Tracks the simulated sweep position/direction exactly like the real Light Bar's
+// update_led_animation() - just without a strip to render to. showCurrentState()
+// is called right when forward_direction flips, since that's the only moment the
+// built-in LED's on/off state actually needs to change.
+void update_direction_animation() {
+  unsigned long current_time = millis();
+
+  if (current_time - last_led_update >= dwellMsFor(current_led)) {
+    last_led_update = current_time;
+    animation_active = true;
+
+    if (forward_direction) {
+      current_led++;
+      if (current_led >= SIMULATED_LED_COUNT - 1) {
+        current_led = SIMULATED_LED_COUNT - 1;
+        forward_direction = false;
+        showCurrentState();
+        if (new_values_pending) applyPendingValues();
+      }
+    } else {
+      current_led--;
+      if (current_led <= 0) {
+        current_led = 0;
+        forward_direction = true;
+        showCurrentState();
+        if (new_values_pending) applyPendingValues();
+      }
+    }
+  }
+}
+
+// Periodic resync trigger - identical logic to the real Light Bar's: nudges the
+// simulated sweep's phase toward "a step boundary is happening now" instead of
+// snapping to it.
 class LedSyncCallback : public BLECharacteristicCallbacks {
   void onWrite(BLECharacteristic* pCharacteristic) {
     uint8_t* data = pCharacteristic->getData();
-    if (!data || pCharacteristic->getLength() != 1 || data[0] != PROTOCOL_VERSION) {
-      Serial.println("LED sync: protocol version mismatch, ignoring");
-      return;
-    }
-    Serial.println("Received LED sync ping");
-    blinkAck(1); // one quick blink = "sync ping received"
+    if (!data || pCharacteristic->getLength() != 1 || data[0] != PROTOCOL_VERSION) return;
+    if (!light_state || !animation_active) return;  // nothing running, nothing to sync
+
+    unsigned long now = millis();
+    unsigned long elapsed = now - last_led_update;
+    unsigned long maxCorrection = (uint32_t)light_delay * SYNC_MAX_CORRECTION_PERCENT / 100;
+    if (maxCorrection < 1) maxCorrection = 1;
+    unsigned long correction = (elapsed < maxCorrection) ? elapsed : maxCorrection;
+
+    last_led_update -= correction;
   }
 };
 
 void setup() {
-  Serial.begin(115200);
-  Serial.println("Starting Light Bar BLE TEST RIG (built-in LED only)...");
-
   pinMode(LED_PIN, OUTPUT);
+  last_led_update = millis();
   showCurrentState();
 
   BLEDevice::init(DEVICE_NAME.c_str());
@@ -257,16 +330,18 @@ void setup() {
 
   BLEService* pService = pServer->createService(LIGHTBAR_SERVICE_UUID);
 
+  // LED state characteristic - WRITE_NR too, so the app can send it without waiting
+  // for an ATT round-trip (see EmdrWirelessApp/src/ble/BleService.ts).
   BLECharacteristic* pLedStateChar = pService->createCharacteristic(
-    LED_STATE_CHARACTERISTIC_UUID, BLECharacteristic::PROPERTY_WRITE);
+    LED_STATE_CHARACTERISTIC_UUID, BLECharacteristic::PROPERTY_WRITE | BLECharacteristic::PROPERTY_WRITE_NR);
   pLedStateChar->setCallbacks(new LedStateCallback());
 
   BLECharacteristic* pLedColorChar = pService->createCharacteristic(
-    LED_COLOR_CHARACTERISTIC_UUID, BLECharacteristic::PROPERTY_WRITE);
+    LED_COLOR_CHARACTERISTIC_UUID, BLECharacteristic::PROPERTY_WRITE | BLECharacteristic::PROPERTY_WRITE_NR);
   pLedColorChar->setCallbacks(new LedColorCallback());
 
   BLECharacteristic* pLedDelayChar = pService->createCharacteristic(
-    LED_DELAY_CHARACTERISTIC_UUID, BLECharacteristic::PROPERTY_WRITE);
+    LED_DELAY_CHARACTERISTIC_UUID, BLECharacteristic::PROPERTY_WRITE | BLECharacteristic::PROPERTY_WRITE_NR);
   pLedDelayChar->setCallbacks(new LedDelayCallback());
 
   BLECharacteristic* pLedSyncChar = pService->createCharacteristic(
@@ -299,15 +374,16 @@ void setup() {
   pAdvertising->setMinPreferred(0x06);  // 7.5ms
   pAdvertising->setMaxPreferred(0x12);  // 22.5ms
   BLEDevice::startAdvertising();
-
-  Serial.println("BLE server started and advertising...");
 }
 
 void loop() {
   while (!deviceConnected) {
     delay(500);
     pServer->startAdvertising();
-    Serial.println("Restarting advertising");
+  }
+
+  if (light_state) {
+    update_direction_animation();
   }
 
   unsigned long now = millis();

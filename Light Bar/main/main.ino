@@ -5,7 +5,7 @@
 #include <BLEServer.h>
 
 // LED Strip configuration
-#define LED_PIN 2      // GPIO pin connected to the LED strip
+#define LED_PIN 20     // GPIO pin connected to the LED strip
 #define LED_COUNT 20   // Number of LEDs in the strip - a hardware constant (the array
                         // below is sized at compile time), NOT settable over BLE. If you
                         // change the physical strip length, update this AND the "LED
@@ -123,8 +123,6 @@ void updateBatteryLevel() {
 // Apply new LED parameters after cycle
 void applyPendingValues() {
   if (new_values_pending) {
-    Serial.println("Applying new LED parameters");
-
     light_state = new_light_state;
     light_r = new_light_r;
     light_g = new_light_g;
@@ -143,8 +141,6 @@ void applyPendingValues() {
 
     new_values_pending = false;
     updateDeviceState();
-
-    Serial.println("LED updated with new values");
   }
 }
 
@@ -152,7 +148,6 @@ void applyPendingValues() {
 class ServerCallbacks : public BLEServerCallbacks {
   void onConnect(BLEServer* pServer) {
     deviceConnected = true;
-    Serial.println("Device connected");
     updateBatteryLevel();
   }
 
@@ -177,8 +172,6 @@ class ServerCallbacks : public BLEServerCallbacks {
     FastLED.clear();
     FastLED.show();
     updateDeviceState();
-
-    Serial.println("Device disconnected, LEDs stopped and reset");
   }
 };
 
@@ -187,23 +180,14 @@ class LedStateCallback : public BLECharacteristicCallbacks {
   void onWrite(BLECharacteristic* pCharacteristic) {
     uint8_t* data = pCharacteristic->getData();
     if (data && pCharacteristic->getLength() == 2) {
-      if (data[0] != PROTOCOL_VERSION) {
-        Serial.println("LED state: protocol version mismatch, ignoring");
-        return;
-      }
+      if (data[0] != PROTOCOL_VERSION) return;
       uint8_t value = data[1];
-      Serial.print("Received LED state: ");
-      Serial.println(value);
-      if (value != 0 && value != 1) {
-        Serial.println("Invalid LED state");
-        return;
-      }
+      if (value != 0 && value != 1) return;
 
       new_light_state = value;
       new_values_pending = true;
       // Turning off shouldn't wait for the sweep to reach an end
       if (!light_state || !animation_active || !value) applyPendingValues();
-      else Serial.println("New LED state pending");
     }
   }
 };
@@ -213,21 +197,16 @@ class LedColorCallback : public BLECharacteristicCallbacks {
   void onWrite(BLECharacteristic* pCharacteristic) {
     uint8_t* data = pCharacteristic->getData();
     if (data && pCharacteristic->getLength() == 4) {
-      if (data[0] != PROTOCOL_VERSION) {
-        Serial.println("LED color: protocol version mismatch, ignoring");
-        return;
-      }
+      if (data[0] != PROTOCOL_VERSION) return;
       uint8_t r = data[1];
       uint8_t g = data[2];
       uint8_t b = data[3];
-      Serial.printf("Received LED color: R=%d, G=%d, B=%d\n", r, g, b);
 
       new_light_r = r;
       new_light_g = g;
       new_light_b = b;
       new_values_pending = true;
       if (!light_state || !animation_active) applyPendingValues();
-      else Serial.println("New LED color pending");
     }
   }
 };
@@ -237,22 +216,13 @@ class LedDelayCallback : public BLECharacteristicCallbacks {
   void onWrite(BLECharacteristic* pCharacteristic) {
     uint8_t* data = pCharacteristic->getData();
     if (data && pCharacteristic->getLength() == 2) {
-      if (data[0] != PROTOCOL_VERSION) {
-        Serial.println("LED delay: protocol version mismatch, ignoring");
-        return;
-      }
+      if (data[0] != PROTOCOL_VERSION) return;
       uint8_t value = data[1];
-      Serial.print("Received LED delay: ");
-      Serial.println(value);
-      if (value < 20 || value > 100 || value % 5 != 0) {
-        Serial.println("Invalid LED delay");
-        return;
-      }
+      if (value < 20 || value > 100 || value % 5 != 0) return;
 
       new_light_delay = value;
       new_values_pending = true;
       if (!light_state || !animation_active) applyPendingValues();
-      else Serial.println("New LED delay pending");
     }
   }
 };
@@ -320,10 +290,7 @@ void update_led_animation() {
 class LedSyncCallback : public BLECharacteristicCallbacks {
   void onWrite(BLECharacteristic* pCharacteristic) {
     uint8_t* data = pCharacteristic->getData();
-    if (!data || pCharacteristic->getLength() != 1 || data[0] != PROTOCOL_VERSION) {
-      Serial.println("LED sync: protocol version mismatch, ignoring");
-      return;
-    }
+    if (!data || pCharacteristic->getLength() != 1 || data[0] != PROTOCOL_VERSION) return;
     if (!light_state || !animation_active) return;  // nothing running, nothing to sync
 
     unsigned long now = millis();
@@ -333,17 +300,10 @@ class LedSyncCallback : public BLECharacteristicCallbacks {
     unsigned long correction = (elapsed < maxCorrection) ? elapsed : maxCorrection;
 
     last_led_update -= correction;
-
-    Serial.print("Resync: nudged LED phase by ");
-    Serial.print(correction);
-    Serial.println("ms");
   }
 };
 
 void setup() {
-  Serial.begin(115200);
-  Serial.println("Starting EMDR Light Bar BLE Server...");
-
   // Initialize LED strip
   FastLED.addLeds<NEOPIXEL, LED_PIN>(leds, LED_COUNT);
   FastLED.clear();  // Clear all LEDs
@@ -355,19 +315,20 @@ void setup() {
 
   BLEService* pService = pServer->createService(LIGHTBAR_SERVICE_UUID);
 
-  // LED state characteristic
+  // LED state characteristic - WRITE_NR too, so the app can send it without waiting
+  // for an ATT round-trip (see EmdrWirelessApp/src/ble/BleService.ts).
   BLECharacteristic* pLedStateChar = pService->createCharacteristic(
-    LED_STATE_CHARACTERISTIC_UUID, BLECharacteristic::PROPERTY_WRITE);
+    LED_STATE_CHARACTERISTIC_UUID, BLECharacteristic::PROPERTY_WRITE | BLECharacteristic::PROPERTY_WRITE_NR);
   pLedStateChar->setCallbacks(new LedStateCallback());
 
   // LED color characteristic
   BLECharacteristic* pLedColorChar = pService->createCharacteristic(
-    LED_COLOR_CHARACTERISTIC_UUID, BLECharacteristic::PROPERTY_WRITE);
+    LED_COLOR_CHARACTERISTIC_UUID, BLECharacteristic::PROPERTY_WRITE | BLECharacteristic::PROPERTY_WRITE_NR);
   pLedColorChar->setCallbacks(new LedColorCallback());
 
   // LED delay characteristic
   BLECharacteristic* pLedDelayChar = pService->createCharacteristic(
-    LED_DELAY_CHARACTERISTIC_UUID, BLECharacteristic::PROPERTY_WRITE);
+    LED_DELAY_CHARACTERISTIC_UUID, BLECharacteristic::PROPERTY_WRITE | BLECharacteristic::PROPERTY_WRITE_NR);
   pLedDelayChar->setCallbacks(new LedDelayCallback());
 
   // LED sync characteristic (write-without-response for minimal latency)
@@ -401,15 +362,12 @@ void setup() {
   pAdvertising->setMinPreferred(0x06);  // 7.5ms
   pAdvertising->setMaxPreferred(0x12);  // 22.5ms
   BLEDevice::startAdvertising();
-
-  Serial.println("BLE server started and advertising...");
 }
 
 void loop() {
   while (!deviceConnected) {
     delay(500);
     pServer->startAdvertising();
-    Serial.println("Restarting advertising");
   }
 
   // Update LED animation if active

@@ -16,6 +16,8 @@ reconstruct from git history.
 ```
 Pulsators/main/main.ino          Firmware for the 2 tactile pulsators
 Light Bar/main/main.ino          Firmware for the visual light bar (LED strip)
+Pulsators Test Rig/main/main.ino Protocol-identical test firmware - built-in
+                                  LED stands in for the motor (see below)
 Light Bar Test Rig/main/main.ino Protocol-identical test firmware - built-in
                                   LED only, no strip needed (see below)
 EmdrWirelessApp/                 React Native (bare CLI) companion app
@@ -29,28 +31,48 @@ All three firmware targets run on an **ESP32-C3 SuperMini** board.
 |---|---|---|
 | Pulsators (×2) | Vibration motor, PWM-driven | `MOTOR_PIN` = GPIO20 |
 | Light Bar | 20-LED WS2812/NeoPixel strip | `LED_PIN` = GPIO2 |
+| Pulsators Test Rig | Same protocol, drives the chip's own built-in LED instead of a motor | GPIO8 - a **plain PWM-driven LED**, same board as the Light Bar Test Rig below |
 | Light Bar Test Rig | Same protocol, drives the chip's own built-in LED instead of a strip | GPIO8 - a **plain PWM-driven LED**, confirmed by testing (not addressable WS2812, despite some SuperMini variants having one - see note below) |
 
 The two pulsators run **the exact same sketch** - they're told apart only by
 the `DEVICE_NAME` constant near the top of `Pulsators/main/main.ino`. Before
-flashing a given board, set it to `"Pulsator 1"` or `"Pulsator 2"`.
+flashing a given board, set it to `"Pulsator 1"` or `"Pulsator 2"`. Same for
+`Pulsators Test Rig/main/main.ino`.
 
-The **Light Bar Test Rig** exists because the real LED strip isn't always
-available to test with. It advertises under the same name and exposes the
-identical BLE service/characteristics as the real Light Bar, so the app needs
-zero changes to talk to it - only the physical output differs. Useful for
-validating app↔firmware communication in isolation.
+The **Test Rigs** exist because real hardware (the strip, the vibration
+motors) isn't always available to test with. Both advertise under the same
+name and expose the identical BLE service/characteristics as their real
+counterpart, so the app needs zero changes to talk to either - only the
+physical output differs:
+
+- **Pulsators Test Rig**: the built-in LED stands in for the motor directly -
+  on/off mirrors `MOTOR_STATE` live (so it's lit for exactly the alternation
+  period and off for the same period, alternating with the other pulsator,
+  matching whatever the app is currently driving), and brightness mirrors
+  `MOTOR_INTENSITY` (dim at low intensity, bright at high).
+- **Light Bar Test Rig**: a single LED can't render a sweep across a strip,
+  so instead it runs the real Light Bar's exact sweep-timing engine
+  internally (position, direction, the 2x end-LED dwell, `LED_SYNC`
+  phase-nudging - see `Light Bar/main/main.ino`) and lights the LED for one
+  direction of that simulated sweep, off for the other. Flashing this
+  alongside both Pulsators Test Rigs lets you visually confirm the three
+  devices are actually staying in sync: the Light Bar Test Rig's LED and one
+  pulsator's LED should turn on together, then both off together as the
+  other pulsator's LED turns on - since all three derive their timing from
+  the same `fullDelayMs * ledCount` formula (see "Sync model" below).
+  `LED_COLOR` writes are still received and echoed back on
+  `DEVICE_STATE_CHARACTERISTIC`, but have no visible effect on this board.
 
 **Built-in LED gotcha**: some ESP32-C3 SuperMini board variants have an
 addressable WS2812 pixel on GPIO8 (which is what the test rig originally
 assumed, and what its own header comment used to claim); this specific board
 turned out to have a **plain single-color LED** on GPIO8 instead, wired
-active-low. The rig was rewritten to drive it with plain PWM
-(`analogWrite`/`ledcWrite`-style, no FastLED) - color writes are reflected as
-*brightness* (perceived luminance of the RGB value) rather than an actual
-color, since a plain LED can't display one. If you're bringing up a new board
-and nothing reacts to a FastLED-based test, don't assume the wiring is
-broken - confirm with a trivial `digitalWrite` blink test first (toggle the
+active-low. Both test rigs drive it with plain PWM (`analogWrite`-style, no
+FastLED) - since a plain LED can't display color, it's used instead for
+on/off timing signals (see above), not as a color preview. If you're
+bringing up a new board and nothing reacts to a FastLED-based test, don't
+assume the wiring is broken - confirm with a trivial `digitalWrite` blink
+test first (toggle the
 pin HIGH/LOW with a delay) before suspecting anything else; that's what
 resolved it here.
 
@@ -71,17 +93,17 @@ byte layout below changes.
 
 | Characteristic | UUID | Bytes | Payload | Notes |
 |---|---|---|---|---|
-| Motor state | `668b943b-2cac-4de0-8091-332dedc91739` | 2 | `[version, state 0/1]` | Write-with-response + write-without-response. Applies instantly. |
-| Motor intensity | `9f1dc367-ee23-4254-a52a-e41b59f50502` | 2 | `[version, intensity 40-200]` | Raw PWM value. Applies instantly, even mid-buzz. |
+| Motor state | `668b943b-2cac-4de0-8091-332dedc91739` | 2 | `[version, state 0/1]` | Write-without-response. Applies instantly. |
+| Motor intensity | `9f1dc367-ee23-4254-a52a-e41b59f50502` | 2 | `[version, intensity 40-200]` | Write-without-response. Raw PWM value. Applies instantly, even mid-buzz. |
 | Device state | see `constants.ts` | 3 | `[version, motor_state, motor_intensity]` | **Read + Notify.** Mirrors what's actually applied - the app reads this once on connect to resync its sliders, so a reconnect never shows stale values. |
 
 **Light Bar** - service `1fb5c201-4faf-459e-8fcc-c5c9c331914b`
 
 | Characteristic | UUID | Bytes | Payload | Notes |
 |---|---|---|---|---|
-| LED state | `2cac943b-668b-4de0-8091-332dedc91739` | 2 | `[version, state 0/1]` | Turning off applies instantly even mid-sweep. |
-| LED color | `526f1035-4262-4175-8ad0-16387b946fce` | 4 | `[version, R, G, B]` | Raw bytes, not a string. |
-| LED delay | `ee231dc3-9f67-4254-a52a-e41b59f50502` | 2 | `[version, delay 20-100, multiple of 5]` | Per-LED step delay (ms), a.k.a. "Full Delay" app-side - sent directly, no conversion, see below. |
+| LED state | `2cac943b-668b-4de0-8091-332dedc91739` | 2 | `[version, state 0/1]` | Write-without-response. Turning off applies instantly even mid-sweep. |
+| LED color | `526f1035-4262-4175-8ad0-16387b946fce` | 4 | `[version, R, G, B]` | Write-without-response. Raw bytes, not a string. |
+| LED delay | `ee231dc3-9f67-4254-a52a-e41b59f50502` | 2 | `[version, delay 20-100, multiple of 5]` | Write-without-response. Per-LED step delay (ms), a.k.a. "Full Delay" app-side - sent directly, no conversion, see below. |
 | LED sync | `822ff8ad-58e1-44f8-8cb5-f4048a0ee3c3` | 1 | `[version]` | Write-without-response trigger, see "Sync model" below. |
 | Device state | see `constants.ts` | 6 | `[version, light_state, r, g, b, delay]` | **Read + Notify.** Same resync purpose as the Pulsators' one. |
 
@@ -108,6 +130,20 @@ up to 3 times, 1s apart, before the app gives up and surfaces an error.
 **Design choice**: the app never persists a MAC address across sessions.
 Every connect is a fresh scan; this is deliberate so the same app works
 against whichever specific kit is nearest, without pairing state to manage.
+
+**Latency**: every control write (state, color, delay, intensity, motor state)
+is write-without-response, and independent devices are written to concurrently
+rather than one after another - e.g. `StimulationEngine.start()` fires the
+Light Bar's setup writes and the pulsators' first alternation at the same time
+via `Promise.all`, instead of waiting for the Light Bar to finish first (see
+`EmdrWirelessApp/src/ble/StimulationEngine.ts`). Firmware also does no `Serial`
+I/O in any live-session code path any more - it was measurably adding to the
+on-screen delay between devices (each `Serial.print` blocks briefly, and it's
+called from inside the same BLE callback that applies the value), so all
+`Serial.begin`/`Serial.print` calls were removed from all four sketches. This
+means **none of the four boards produce Serial Monitor output any more** -
+if you need to debug firmware again, temporarily add prints back rather than
+assuming something is broken because the monitor is silent.
 
 ## Sync model - "the app is the clock"
 

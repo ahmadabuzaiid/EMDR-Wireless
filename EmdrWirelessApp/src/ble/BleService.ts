@@ -268,7 +268,7 @@ class BleService implements IBleService {
     const device = this.devices[role];
     if (!device) return;
     await this.writeWithRetry(() =>
-      device.writeCharacteristicWithResponseForService(
+      device.writeCharacteristicWithoutResponseForService(
         PULSATOR_SERVICE_UUID,
         MOTOR_INTENSITY_CHARACTERISTIC_UUID,
         bytesToBase64([PROTOCOL_VERSION, firmwareValue]),
@@ -277,11 +277,14 @@ class BleService implements IBleService {
   }
 
   // --- Light bar writes --------------------------------------------------------
+  // All without-response, same as the pulsator writes above - firmware declares
+  // WRITE_NR on every one of these characteristics specifically so the app can skip
+  // the ATT write-response round trip and get as close to real-time as BLE allows.
   async writeLedState(on: boolean): Promise<void> {
     const device = this.devices.lightBar;
     if (!device) return;
     await this.writeWithRetry(() =>
-      device.writeCharacteristicWithResponseForService(
+      device.writeCharacteristicWithoutResponseForService(
         LIGHTBAR_SERVICE_UUID,
         LED_STATE_CHARACTERISTIC_UUID,
         bytesToBase64([PROTOCOL_VERSION, on ? 1 : 0]),
@@ -293,7 +296,7 @@ class BleService implements IBleService {
     const device = this.devices.lightBar;
     if (!device) return;
     await this.writeWithRetry(() =>
-      device.writeCharacteristicWithResponseForService(
+      device.writeCharacteristicWithoutResponseForService(
         LIGHTBAR_SERVICE_UUID,
         LED_COLOR_CHARACTERISTIC_UUID,
         bytesToBase64([PROTOCOL_VERSION, r, g, b]),
@@ -305,7 +308,7 @@ class BleService implements IBleService {
     const device = this.devices.lightBar;
     if (!device) return;
     await this.writeWithRetry(() =>
-      device.writeCharacteristicWithResponseForService(
+      device.writeCharacteristicWithoutResponseForService(
         LIGHTBAR_SERVICE_UUID,
         LED_DELAY_CHARACTERISTIC_UUID,
         bytesToBase64([PROTOCOL_VERSION, perLedDelayMs]),

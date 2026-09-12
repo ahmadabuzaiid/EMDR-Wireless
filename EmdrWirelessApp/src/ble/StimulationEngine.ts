@@ -53,17 +53,44 @@ class StimulationEngine {
     const errors: string[] = [];
     const superseded = () => this.generation !== myGeneration;
 
-    if (config.lightBarEnabled) {
-      await this.safe(errors, 'set light delay', () => bleService.writeLedDelay(config.fullDelayMs));
-      await this.safe(errors, 'set light color', () =>
-        bleService.writeLedColor(config.color.r, config.color.g, config.color.b),
-      );
-      await this.safe(errors, 'turn light on', () => bleService.writeLedState(true));
-      if (superseded()) return errors;
+    // The Light Bar setup and the pulsator alternation start are independent
+    // devices - run them concurrently (Promise.all) rather than one after the
+    // other, so the pulsators aren't left waiting on the light bar's writes to
+    // finish first (or vice versa). This is what actually gets all three
+    // devices turning on together instead of a visibly staggered sequence.
+    const branches: Promise<void>[] = [];
 
-      this.resyncTimer = setInterval(() => {
-        bleService.pingLedSync().catch(err => console.warn('[StimulationEngine] LED sync ping failed:', err));
-      }, LED_RESYNC_INTERVAL_MS);
+    if (config.lightBarEnabled) {
+      branches.push(
+        (async () => {
+          // If a session is already running (e.g. the user just dragged Full
+          // Delay), the firmware won't apply a new delay/color/state right away -
+          // it defers to whenever its *current* sweep next reaches an endpoint,
+          // so a step never gets visibly cut short. That's the right call for a
+          // live color tweak, but wrong here: the pulsator branch below resets
+          // its phase immediately (activeSide = 1, fired now), while the Light
+          // Bar would keep drifting on its old phase until some arbitrary later
+          // moment - which is exactly what let the bar go out of phase with the
+          // pulsators after a mid-session delay change. Turning the light off
+          // first always applies immediately regardless of what it's currently
+          // doing, and turning it back on always starts a fresh sweep from LED 0
+          // - so this forces the same synchronized restart Start Session gets,
+          // every time timing changes mid-session. Harmless/no-op on a genuine
+          // first start, since the light is already off then.
+          await this.safe(errors, 'reset light phase', () => bleService.writeLedState(false));
+          await Promise.all([
+            this.safe(errors, 'set light delay', () => bleService.writeLedDelay(config.fullDelayMs)),
+            this.safe(errors, 'set light color', () =>
+              bleService.writeLedColor(config.color.r, config.color.g, config.color.b),
+            ),
+            this.safe(errors, 'turn light on', () => bleService.writeLedState(true)),
+          ]);
+          if (superseded()) return;
+          this.resyncTimer = setInterval(() => {
+            bleService.pingLedSync().catch(err => console.warn('[StimulationEngine] LED sync ping failed:', err));
+          }, LED_RESYNC_INTERVAL_MS);
+        })(),
+      );
     }
 
     if (config.pulsatorsEnabled) {
@@ -79,16 +106,19 @@ class StimulationEngine {
         : config.pulsatorOnlyDelayMs;
 
       this.activeSide = 1;
-      await this.safe(errors, 'start pulsator alternation', () => this.fireAlternation());
-      if (superseded()) return errors;
-
-      this.alternateTimer = setInterval(() => {
-        this.fireAlternation().catch(err =>
-          console.warn('[StimulationEngine] pulsator alternation write failed:', err),
-        );
-      }, alternationPeriodMs);
+      branches.push(
+        this.safe(errors, 'start pulsator alternation', () => this.fireAlternation()).then(() => {
+          if (superseded()) return;
+          this.alternateTimer = setInterval(() => {
+            this.fireAlternation().catch(err =>
+              console.warn('[StimulationEngine] pulsator alternation write failed:', err),
+            );
+          }, alternationPeriodMs);
+        }),
+      );
     }
 
+    await Promise.all(branches);
     return errors;
   }
 
@@ -97,9 +127,13 @@ class StimulationEngine {
     this.running = false;
     this.generation++;
     const errors: string[] = [];
-    await this.safe(errors, 'stop pulsator 1', () => bleService.writeMotorState('pulsator1', false));
-    await this.safe(errors, 'stop pulsator 2', () => bleService.writeMotorState('pulsator2', false));
-    await this.safe(errors, 'turn light off', () => bleService.writeLedState(false));
+    // Same reasoning as start(): these three target independent devices, so stop
+    // them all at once instead of one after another.
+    await Promise.all([
+      this.safe(errors, 'stop pulsator 1', () => bleService.writeMotorState('pulsator1', false)),
+      this.safe(errors, 'stop pulsator 2', () => bleService.writeMotorState('pulsator2', false)),
+      this.safe(errors, 'turn light off', () => bleService.writeLedState(false)),
+    ]);
     return errors;
   }
 

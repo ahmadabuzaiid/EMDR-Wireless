@@ -40,6 +40,14 @@ light bar over Bluetooth Low Energy, gated by a one-time activation code.
   shown next to each device on the Device Select screen. Degrades gracefully
   (just doesn't show anything) if a device doesn't answer - no real battery-sensing
   hardware is confirmed wired on the physical units yet, see the root README.
+- **Screen stays on while the app is in the foreground** (`MainActivity.kt`'s
+  `FLAG_KEEP_SCREEN_ON` / `AppDelegate.swift`'s `isIdleTimerDisabled`). A running
+  session drives every BLE write off a JS timer - once the OS lets the screen sleep
+  from inactivity, it suspends that timer (and throttles background BLE), which
+  silently stopped the pulsators mid-session. Applied for the whole app lifetime
+  rather than tied to session state, since that's simpler and there's no real
+  reason to let the screen sleep while this app is open anyway. A manual
+  power-button press still works as normal.
 
 ## Slider ranges (user-facing vs. what's actually sent over BLE)
 
