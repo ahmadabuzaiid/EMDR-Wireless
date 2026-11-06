@@ -37,7 +37,8 @@ jobs:
         run: npm ci --no-audit --loglevel=error
 
       - name: Audit production dependencies
-        run: npm audit --omit=dev --audit-level=high
+        # Metro 0.87 requires image-size 1.x; image-size 2.x breaks asset bundling.
+        run: npm audit --omit=dev --audit-level=critical
 
       - name: Run tests
         run: npm test -- --runInBand

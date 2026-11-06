@@ -276,6 +276,10 @@ require the `OTP_SECRET`, `ANDROID_KEYSTORE_BASE64`,
 `ANDROID_KEYSTORE_PASSWORD`, `ANDROID_KEY_ALIAS`, and `ANDROID_KEY_PASSWORD`
 Actions secrets. Pull requests from forks cannot access secrets and therefore
 must be validated separately before a production release is built.
+The production audit blocks critical vulnerabilities. Metro 0.87 requires
+`image-size` 1.x for asset paths; forcing the newer 2.x release causes the
+Android bundle to fail, so that known transitive high-severity advisory is
+kept constrained to Metro until Metro supports the newer API.
 
 Never print `OTP_SECRET` or signing credentials in workflow logs. Generate an
 OTP locally with `node EmdrWirelessApp/scripts/generate-otp-secret.js`, add the
