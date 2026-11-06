@@ -34,7 +34,10 @@ jobs:
           cache-dependency-path: EmdrWirelessApp/package-lock.json
 
       - name: Install dependencies
-        run: npm ci
+        run: npm ci --no-audit --loglevel=error
+
+      - name: Audit production dependencies
+        run: npm audit --omit=dev --audit-level=high
 
       - name: Run tests
         run: npm test -- --runInBand
@@ -65,7 +68,7 @@ jobs:
 
       - name: Install JavaScript dependencies
         working-directory: EmdrWirelessApp
-        run: npm ci
+        run: npm ci --no-audit --loglevel=error
 
       - name: Generate CI environment
         working-directory: EmdrWirelessApp
