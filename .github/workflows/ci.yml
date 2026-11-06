@@ -46,7 +46,7 @@ jobs:
         run: npx tsc --noEmit
 
   android:
-    name: Android debug APK
+    name: Android release APK
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     defaults:
@@ -67,36 +67,93 @@ jobs:
         working-directory: EmdrWirelessApp
         run: npm ci
 
+      - name: Generate CI environment
+        working-directory: EmdrWirelessApp
+        env:
+          OTP_SECRET: ${{ secrets.OTP_SECRET }}
+          CI_EVENT: ${{ github.event_name }}
+        run: |
+          set -euo pipefail
+          if [ -z "${OTP_SECRET:-}" ]; then
+            if [ "$CI_EVENT" != "pull_request" ]; then
+              echo "::error::Missing the OTP_SECRET Actions secret. Add it under Settings > Secrets and variables > Actions."
+              exit 1
+            fi
+            node scripts/generate-otp-secret.js >/dev/null
+            echo "Generated an ephemeral OTP secret for pull-request validation."
+          else
+            awk -v secret="$OTP_SECRET" '
+              /^OTP_SECRET=/ { print "OTP_SECRET=" secret; next }
+              { print }
+            ' .env.example > .env
+          fi
+
       - name: Set up Java
         uses: actions/setup-java@v6
         with:
           distribution: temurin
-          java-version: '17'
+          java-version: "17"
           cache: gradle
 
       - name: Set up Android SDK
         uses: android-actions/setup-android@v4
 
-      - name: Install Android SDK packages
+      - name: Verify Android SDK
         run: |
-          sdkmanager --install \
-            "platform-tools" \
-            "platforms;android-36" \
-            "build-tools;36.0.0" \
-            "ndk;30.0.16248370"
-          yes | sdkmanager --licenses >/dev/null
+          set -euo pipefail
+          test -d "$ANDROID_HOME/platforms/android-36"
+          test -d "$ANDROID_HOME/build-tools/36.0.0"
+          test -d "$ANDROID_HOME/ndk/30.0.16248370"
+          echo "Android SDK, build tools, and NDK are available on the hosted runner."
 
       - name: Configure SDK path
         run: printf 'sdk.dir=%s\n' "$ANDROID_HOME" > local.properties
 
-      - name: Build debug APK
-        run: ./gradlew assembleDebug --no-daemon --stacktrace
+      - name: Prepare release signing
+        if: github.event_name != 'pull_request'
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          for name in ANDROID_KEYSTORE_BASE64 ANDROID_KEYSTORE_PASSWORD ANDROID_KEY_ALIAS ANDROID_KEY_PASSWORD; do
+            if [ -z "${!name:-}" ]; then
+              echo "::error::Missing required release signing secret: ${name}"
+              exit 1
+            fi
+          done
+          export ANDROID_KEYSTORE_FILE="$RUNNER_TEMP/emdr-release.keystore"
+          printf '%s' "$ANDROID_KEYSTORE_BASE64" | base64 --decode > "$ANDROID_KEYSTORE_FILE"
+          test -s "$ANDROID_KEYSTORE_FILE"
+          {
+            echo "ANDROID_KEYSTORE_FILE=$ANDROID_KEYSTORE_FILE"
+            echo "ANDROID_KEYSTORE_PASSWORD=$ANDROID_KEYSTORE_PASSWORD"
+            echo "ANDROID_KEY_ALIAS=$ANDROID_KEY_ALIAS"
+            echo "ANDROID_KEY_PASSWORD=$ANDROID_KEY_PASSWORD"
+          } >> "$GITHUB_ENV"
 
-      - name: Upload debug APK
-        uses: actions/upload-artifact@v4
+      - name: Prepare pull-request signing
+        if: github.event_name == 'pull_request'
+        run: |
+          set -euo pipefail
+          {
+            echo "ANDROID_KEYSTORE_FILE=$GITHUB_WORKSPACE/EmdrWirelessApp/android/app/debug.keystore"
+            echo "ANDROID_KEYSTORE_PASSWORD=android"
+            echo "ANDROID_KEY_ALIAS=androiddebugkey"
+            echo "ANDROID_KEY_PASSWORD=android"
+          } >> "$GITHUB_ENV"
+          echo "Pull request build uses the non-production debug key because repository secrets are unavailable."
+
+      - name: Build release APK
+        run: ./gradlew assembleRelease --no-daemon --build-cache --stacktrace
+
+      - name: Upload release APK
+        uses: actions/upload-artifact@v7
         with:
-          name: android-debug-apk
-          path: EmdrWirelessApp/android/app/build/outputs/apk/debug/*.apk
+          name: android-release-apk
+          path: EmdrWirelessApp/android/app/build/outputs/apk/release/*.apk
           if-no-files-found: error
           retention-days: 3
 

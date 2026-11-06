@@ -270,8 +270,19 @@ architectural.
 GitHub Actions runs on pushes to `master`, pull requests, and manual workflow
 runs. It installs the locked mobile dependencies and runs Jest, ESLint, and
 TypeScript checking; compiles all four Arduino sketches for the ESP32-C3; and
-builds the Android debug APK. The APK is uploaded as the `android-debug-apk`
-artifact and retained for three days.
+builds the Android release APK. The APK is uploaded as the
+`android-release-apk` artifact and retained for three days. Pushes to `master`
+require the `OTP_SECRET`, `ANDROID_KEYSTORE_BASE64`,
+`ANDROID_KEYSTORE_PASSWORD`, `ANDROID_KEY_ALIAS`, and `ANDROID_KEY_PASSWORD`
+Actions secrets. Pull requests from forks cannot access secrets and therefore
+must be validated separately before a production release is built.
+
+Never print `OTP_SECRET` or signing credentials in workflow logs. Generate an
+OTP locally with `node EmdrWirelessApp/scripts/generate-otp-secret.js`, add the
+value to your authenticator, and save that same value as the repository's
+`OTP_SECRET` Actions secret. Generate a production keystore with `keytool`,
+base64-encode it, and store the result as `ANDROID_KEYSTORE_BASE64`; keep the
+keystore and passwords backed up securely.
 
 ## Known environment gotchas (if setting up on a fresh machine)
 
