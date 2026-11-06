@@ -12,6 +12,8 @@
                         // count" setting in the app (Settings screen) to match - the app
                         // uses its own copy of this number purely for its cycle-time-to-
                         // per-LED-delay math and has no way to read it back from here.
+#define LED_CHIPSET WS2811
+#define LED_COLOR_ORDER RGB // Verify with solid red, green, and blue test colors.
 CRGB leds[LED_COUNT];  // Define the LED strip array
 
 // BLE UUIDs
@@ -305,7 +307,10 @@ class LedSyncCallback : public BLECharacteristicCallbacks {
 
 void setup() {
   // Initialize LED strip
-  FastLED.addLeds<NEOPIXEL, LED_PIN>(leds, LED_COUNT);
+  // The protocol sends RGB bytes. FastLED maps CRGB(r, g, b) to this strip's
+  // physical channel order. Change LED_COLOR_ORDER to GRB if the channel test
+  // shows that this strip uses GRB ordering.
+  FastLED.addLeds<LED_CHIPSET, LED_PIN, LED_COLOR_ORDER>(leds, LED_COUNT);
   FastLED.clear();  // Clear all LEDs
   FastLED.show();   // Update LEDs with all off
 

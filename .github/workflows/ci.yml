@@ -1,0 +1,138 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - master
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  mobile:
+    name: Mobile app
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: EmdrWirelessApp
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: EmdrWirelessApp/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run tests
+        run: npm test -- --runInBand
+
+      - name: Run lint
+        run: npm run lint
+
+      - name: Type-check
+        run: npx tsc --noEmit
+
+  android:
+    name: Android debug APK
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: EmdrWirelessApp/android
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: EmdrWirelessApp/package-lock.json
+
+      - name: Install JavaScript dependencies
+        working-directory: EmdrWirelessApp
+        run: npm ci
+
+      - name: Set up Java
+        uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: '17'
+          cache: gradle
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v4
+
+      - name: Install Android SDK packages
+        run: |
+          sdkmanager --install \
+            "platform-tools" \
+            "platforms;android-36" \
+            "build-tools;36.0.0" \
+            "ndk;30.0.16248370"
+          yes | sdkmanager --licenses >/dev/null
+
+      - name: Configure SDK path
+        run: printf 'sdk.dir=%s\n' "$ANDROID_HOME" > local.properties
+
+      - name: Build debug APK
+        run: ./gradlew assembleDebug --no-daemon --stacktrace
+
+      - name: Upload debug APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-debug-apk
+          path: EmdrWirelessApp/android/app/build/outputs/apk/debug/*.apk
+          if-no-files-found: error
+          retention-days: 3
+
+  firmware:
+    name: Arduino firmware
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Set up Arduino CLI
+        uses: arduino/setup-arduino-cli@v2
+
+      - name: Configure Arduino CLI
+        run: |
+          arduino-cli config init
+          arduino-cli core update-index
+
+      - name: Install ESP32 core
+        run: arduino-cli core install esp32:esp32
+
+      - name: Install FastLED
+        run: arduino-cli lib install FastLED
+
+      - name: Compile firmware sketches
+        run: |
+          for sketch in \
+            "Pulsators/main" \
+            "Pulsators Test Rig/main" \
+            "Light Bar/main" \
+            "Light Bar Test Rig/main"; do
+            echo "::group::Compiling ${sketch}"
+            arduino-cli compile \
+              --fqbn esp32:esp32:esp32c3 \
+              --warnings all \
+              "${sketch}"
+            echo "::endgroup::"
+          done

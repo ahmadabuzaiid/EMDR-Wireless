@@ -30,7 +30,7 @@ All three firmware targets run on an **ESP32-C3 SuperMini** board.
 | Component | Role | Key pins |
 |---|---|---|
 | Pulsators (×2) | Vibration motor, PWM-driven | `MOTOR_PIN` = GPIO20 |
-| Light Bar | 20-LED WS2812/NeoPixel strip | `LED_PIN` = GPIO2 |
+| Light Bar | 20-LED WS2811 strip | `LED_PIN` = GPIO20 |
 | Pulsators Test Rig | Same protocol, drives the chip's own built-in LED instead of a motor | GPIO8 - a **plain PWM-driven LED**, same board as the Light Bar Test Rig below |
 | Light Bar Test Rig | Same protocol, drives the chip's own built-in LED instead of a strip | GPIO8 - a **plain PWM-driven LED**, confirmed by testing (not addressable WS2812, despite some SuperMini variants having one - see note below) |
 
@@ -38,6 +38,12 @@ The two pulsators run **the exact same sketch** - they're told apart only by
 the `DEVICE_NAME` constant near the top of `Pulsators/main/main.ino`. Before
 flashing a given board, set it to `"Pulsator 1"` or `"Pulsator 2"`. Same for
 `Pulsators Test Rig/main/main.ino`.
+
+The Light Bar firmware is configured for a WS2811 strip. Its BLE protocol
+remains logical RGB (`[version, R, G, B]`); `LED_COLOR_ORDER` maps those values
+to the strip wiring. WS2811 does not guarantee one channel order, so verify
+with solid red, green, and blue test colors and switch that macro between `RGB`
+and `GRB` if the colors are swapped.
 
 The **Test Rigs** exist because real hardware (the strip, the vibration
 motors) isn't always available to test with. Both advertise under the same
@@ -258,6 +264,14 @@ Full setup/build instructions (Android SDK, running on a real device,
 generating a shareable release APK) are in `EmdrWirelessApp/README.md` -
 kept there rather than duplicated here since they're operational, not
 architectural.
+
+## Continuous integration
+
+GitHub Actions runs on pushes to `master`, pull requests, and manual workflow
+runs. It installs the locked mobile dependencies and runs Jest, ESLint, and
+TypeScript checking; compiles all four Arduino sketches for the ESP32-C3; and
+builds the Android debug APK. The APK is uploaded as the `android-debug-apk`
+artifact and retained for three days.
 
 ## Known environment gotchas (if setting up on a fresh machine)
 

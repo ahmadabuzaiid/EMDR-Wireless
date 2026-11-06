@@ -55,6 +55,7 @@ class BleService implements IBleService {
   private callbacks: ConnectCallbacks | null = null;
   private activeRoles: DeviceRole[] = [];
   private intentionalDisconnect = false;
+  private ledColorWrite: Promise<void> = Promise.resolve();
 
   async waitForPoweredOn(timeoutMs = 5000): Promise<boolean> {
     if ((await this.manager.state()) === State.PoweredOn) return true;
@@ -295,13 +296,22 @@ class BleService implements IBleService {
   async writeLedColor(r: number, g: number, b: number): Promise<void> {
     const device = this.devices.lightBar;
     if (!device) return;
-    await this.writeWithRetry(() =>
-      device.writeCharacteristicWithoutResponseForService(
-        LIGHTBAR_SERVICE_UUID,
-        LED_COLOR_CHARACTERISTIC_UUID,
-        bytesToBase64([PROTOCOL_VERSION, r, g, b]),
-      ),
-    );
+    // Color-picker callbacks can arrive before the previous write has finished.
+    // Keep these writes ordered so an older BLE packet cannot overwrite the
+    // user's latest selection.
+    const write = this.ledColorWrite
+      .catch(() => undefined)
+      .then(() =>
+        this.writeWithRetry(() =>
+          device.writeCharacteristicWithoutResponseForService(
+            LIGHTBAR_SERVICE_UUID,
+            LED_COLOR_CHARACTERISTIC_UUID,
+            bytesToBase64([PROTOCOL_VERSION, r, g, b]),
+          ),
+        ),
+      );
+    this.ledColorWrite = write;
+    await write;
   }
 
   async writeLedDelay(perLedDelayMs: number): Promise<void> {
