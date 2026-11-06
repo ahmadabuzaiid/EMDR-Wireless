@@ -127,8 +127,8 @@ export default function ControlScreen() {
 
         {lightBarEnabled && (
           <View style={styles.card}>
-            <Text style={[styles.cardTitle, { marginBottom: 12 }]}>Light Color</Text>
-            <View style={{ height: 260 }}>
+            <Text style={styles.colorTitle}>Light Color</Text>
+            <View style={styles.colorPicker}>
               <ColorPicker
                 color={rgbToHex(color.r, color.g, color.b)}
                 onColorChangeComplete={(hex: string) => setColor(hexToRgb(hex))}
@@ -210,6 +210,8 @@ const styles = StyleSheet.create({
   },
   cardHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'baseline' },
   cardTitle: { fontSize: 14, fontWeight: '600', color: colors.text },
+  colorTitle: { fontSize: 14, fontWeight: '600', color: colors.text, marginBottom: 12 },
+  colorPicker: { height: 260 },
   cardValue: { fontSize: 14, fontWeight: '600', color: colors.primary },
   flexSpacer: { minHeight: 12, flexGrow: 1 },
   actions: { gap: 10 },

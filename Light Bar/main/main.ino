@@ -261,7 +261,7 @@ void update_led_animation() {
 
     // Calculate next LED position
     if (forward_direction) {
-      current_led++;
+      current_led = current_led + 1;
       if (current_led >= LED_COUNT - 1) {
         current_led = LED_COUNT - 1;
         forward_direction = false;
@@ -272,7 +272,7 @@ void update_led_animation() {
         }
       }
     } else {
-      current_led--;
+      current_led = current_led - 1;
       if (current_led <= 0) {
         current_led = 0;
         forward_direction = true;
@@ -305,6 +305,9 @@ class LedSyncCallback : public BLECharacteristicCallbacks {
   }
 };
 
+// Keep the descriptor for compatibility with the deployed BLE clients.
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
 void setup() {
   // Initialize LED strip
   // The protocol sends RGB bytes. FastLED maps CRGB(r, g, b) to this strip's
@@ -368,6 +371,7 @@ void setup() {
   pAdvertising->setMaxPreferred(0x12);  // 22.5ms
   BLEDevice::startAdvertising();
 }
+#pragma GCC diagnostic pop
 
 void loop() {
   while (!deviceConnected) {

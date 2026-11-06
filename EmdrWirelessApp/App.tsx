@@ -11,9 +11,13 @@ import { SafeAreaProvider } from 'react-native-safe-area-context';
 import { SessionProvider } from './src/context/SessionContext';
 import RootNavigator from './src/navigation/RootNavigator';
 
+const styles = {
+  root: { flex: 1 },
+};
+
 function App() {
   return (
-    <GestureHandlerRootView style={{ flex: 1 }}>
+    <GestureHandlerRootView style={styles.root}>
       <SafeAreaProvider>
         <StatusBar barStyle="dark-content" />
         <SessionProvider>

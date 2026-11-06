@@ -160,6 +160,9 @@ class MotorIntensityCallback : public BLECharacteristicCallbacks {
   }
 };
 
+// Keep the descriptor for compatibility with the deployed BLE clients.
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
 void setup() {
   pinMode(LED_PIN, OUTPUT);
   showCurrentState();
@@ -208,6 +211,7 @@ void setup() {
   pAdvertising->setMaxPreferred(0x12);  // 22.5ms
   BLEDevice::startAdvertising();
 }
+#pragma GCC diagnostic pop
 
 void loop() {
   while (!deviceConnected) {

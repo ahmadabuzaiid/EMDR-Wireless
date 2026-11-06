@@ -135,6 +135,10 @@ class MotorIntensityCallback : public BLECharacteristicCallbacks {
   }
 };
 
+// The ESP32 BLE compatibility layer still needs this descriptor on the deployed
+// hardware, although newer NimBLE headers mark manual construction deprecated.
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
 void setup() {
   pinMode(MOTOR_PIN, OUTPUT);
   analogWrite(MOTOR_PIN, 0);
@@ -183,6 +187,7 @@ void setup() {
   pAdvertising->setMaxPreferred(0x12);  // 22.5ms
   BLEDevice::startAdvertising();
 }
+#pragma GCC diagnostic pop
 
 void loop() {
   while (!deviceConnected) {

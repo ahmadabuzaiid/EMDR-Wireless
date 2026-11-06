@@ -281,7 +281,7 @@ void update_direction_animation() {
     animation_active = true;
 
     if (forward_direction) {
-      current_led++;
+      current_led = current_led + 1;
       if (current_led >= SIMULATED_LED_COUNT - 1) {
         current_led = SIMULATED_LED_COUNT - 1;
         forward_direction = false;
@@ -289,7 +289,7 @@ void update_direction_animation() {
         if (new_values_pending) applyPendingValues();
       }
     } else {
-      current_led--;
+      current_led = current_led - 1;
       if (current_led <= 0) {
         current_led = 0;
         forward_direction = true;
@@ -319,6 +319,9 @@ class LedSyncCallback : public BLECharacteristicCallbacks {
   }
 };
 
+// Keep the descriptor for compatibility with the deployed BLE clients.
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
 void setup() {
   pinMode(LED_PIN, OUTPUT);
   last_led_update = millis();
@@ -375,6 +378,7 @@ void setup() {
   pAdvertising->setMaxPreferred(0x12);  // 22.5ms
   BLEDevice::startAdvertising();
 }
+#pragma GCC diagnostic pop
 
 void loop() {
   while (!deviceConnected) {
